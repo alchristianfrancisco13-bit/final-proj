@@ -4,7 +4,7 @@ import { doc, setDoc, getDoc } from "firebase/firestore";
 import { db } from "./firebase";
 import { EMAILJS_CONFIG, OTP_CONFIG, FIRESTORE_COLLECTIONS } from "./config";
 
-function OTPVerification({ email, role, onVerificationSuccess, onBack }) {
+function OTPVerification({ email, role, name, phone, onVerificationSuccess, onBack }) {
   const [otp, setOtp] = useState("");
   const [generatedOtp, setGeneratedOtp] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -129,8 +129,12 @@ function OTPVerification({ email, role, onVerificationSuccess, onBack }) {
         verifiedAt: new Date()
       }, { merge: true });
 
-      // Call success callback
-      onVerificationSuccess();
+      // Call success callback with user information
+      onVerificationSuccess({
+        name,
+        phone,
+        role
+      });
       
     } catch (error) {
       console.error('Error verifying OTP:', error);

@@ -96,7 +96,7 @@ function Login() {
     <div
       className="flex items-center justify-center min-h-screen bg-gradient-to-br from-[#f8f6f1] via-[#e9e7e1] to-[#d1cfc7]"
       style={{
-        backgroundImage: "url('https://i.pinimg.com/1200x/c4/9d/ef/c49defa16fd398e0e27d19473c179886.jpg')",
+        backgroundImage: "url('https://i.pinimg.com/originals/99/02/d4/9902d4dbccf471c1362f7784f6dd5e91.gif')",
         backgroundSize: "cover",
         backgroundPosition: "center",
         backgroundRepeat: "no-repeat"

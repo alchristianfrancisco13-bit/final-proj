@@ -17,11 +17,58 @@ import {
 import { updateEmail, sendEmailVerification, reauthenticateWithCredential, EmailAuthProvider } from "firebase/auth";
 import { updateListingMetrics } from "./utils/listingMetrics";
 import Messages from "./components/Messages";
+import ChatList from "./components/ChatList";
 
 function GuestPage({ onLogout }) {
 
   useEffect(() => {
     document.title = "Guest Dashboard - StayHub";
+  }, []);
+
+  // Load user profile from Firestore
+  useEffect(() => {
+    const loadUserProfile = async () => {
+      const userId = auth.currentUser?.uid;
+      if (userId) {
+        try {
+          const userDoc = await getDoc(doc(db, "users", userId));
+          if (userDoc.exists()) {
+            const userData = userDoc.data();
+            setProfile(prev => ({
+              ...prev,
+              name: userData.name || "Guest User",
+              phone: userData.phone || "Not provided",
+              email: userData.email || auth.currentUser?.email || "Loading..."
+            }));
+          } else {
+            // Fallback to localStorage if Firestore data doesn't exist
+            const saved = localStorage.getItem(`guestProfile_${userId}`);
+            if (saved) {
+              const savedProfile = JSON.parse(saved);
+              setProfile(prev => ({
+                ...prev,
+                ...savedProfile,
+                email: auth.currentUser?.email || "Loading..."
+              }));
+            }
+          }
+        } catch (error) {
+          console.error("Error loading user profile:", error);
+          // Fallback to localStorage on error
+          const saved = localStorage.getItem(`guestProfile_${userId}`);
+          if (saved) {
+            const savedProfile = JSON.parse(saved);
+            setProfile(prev => ({
+              ...prev,
+              ...savedProfile,
+              email: auth.currentUser?.email || "Loading..."
+            }));
+          }
+        }
+      }
+    };
+
+    loadUserProfile();
   }, []);
 
   // Initial listings state setup
@@ -207,20 +254,12 @@ function GuestPage({ onLogout }) {
   const [search, setSearch] = useState("");
   const [firebaseListings, setFirebaseListings] = useState([]);
   const [bookings, setBookings] = useState([]);
-  const [profile, setProfile] = useState(() => {
-    const userId = auth.currentUser?.uid;
-    const saved = localStorage.getItem(`guestProfile_${userId}`);
-    const savedProfile = saved ? JSON.parse(saved) : {
-      name: auth.currentUser?.email ? auth.currentUser.email.split('@')[0] : "Guest User",
-      phone: "+63 912 345 6789",
+  const [profile, setProfile] = useState({
+    name: "Loading...",
+    phone: "Loading...",
+    email: auth.currentUser?.email || "Loading...",
       avatar: "https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?q=80&w=100&auto=format&fit=crop&ixlib=rb-4.0.3",
       preferences: { notifications: true, emailUpdates: true, smsUpdates: false }
-    };
-    // Always use the authenticated email
-    return {
-      ...savedProfile,
-      email: auth.currentUser?.email || "Loading..."
-    };
   });
   const [searchResults, setSearchResults] = useState([]);
   const [showBookingDetails, setShowBookingDetails] = useState(null);
@@ -246,7 +285,9 @@ function GuestPage({ onLogout }) {
   const [paymentAmount, setPaymentAmount] = useState(0);
   const [selectedBooking, setSelectedBooking] = useState(null);
   const [showMessages, setShowMessages] = useState(false);
+  const [showChatList, setShowChatList] = useState(false);
   const [selectedHost, setSelectedHost] = useState(null);
+  const [selectedProperty, setSelectedProperty] = useState(null);
   const [showRatingModal, setShowRatingModal] = useState(false);
   const [selectedBookingToRate, setSelectedBookingToRate] = useState(null);
   const [rating, setRating] = useState(0);
@@ -287,9 +328,35 @@ function GuestPage({ onLogout }) {
   };
 
   // Save profile
-  const handleProfileSave = () => {
+  const handleProfileSave = async () => {
+    try {
+      const userId = auth.currentUser?.uid;
+      if (userId) {
+        // Update Firestore
+        await updateDoc(doc(db, "users", userId), {
+          name: editProfileData.name,
+          phone: editProfileData.phone,
+          updatedAt: new Date()
+        });
+        
+        // Update local state
     setProfile(editProfileData);
+        
+        // Update localStorage as backup
+        localStorage.setItem(`guestProfile_${userId}`, JSON.stringify({
+          name: editProfileData.name,
+          phone: editProfileData.phone,
+          avatar: editProfileData.avatar,
+          preferences: editProfileData.preferences
+        }));
+      }
     setShowEditProfile(false);
+    } catch (error) {
+      console.error("Error saving profile:", error);
+      // Still update local state even if Firestore fails
+      setProfile(editProfileData);
+      setShowEditProfile(false);
+    }
   };
 
   // Star rating component
@@ -1176,7 +1243,26 @@ function GuestPage({ onLogout }) {
       displayName: listing.host || 'Host',
       email: 'host@stayhub.com'
     });
+    setSelectedProperty({
+      id: listing.id,
+      name: listing.title || listing.name || listing.propertyName || 'Property',
+      type: listing.type || 'accommodation',
+      location: listing.location || listing.address || 'Location not specified'
+    });
     setShowMessages(true);
+  };
+
+  // Handle chat selection from chat list
+  const handleSelectChat = (otherUser, propertyInfo = null) => {
+    setSelectedHost(otherUser);
+    setSelectedProperty(propertyInfo);
+    setShowChatList(false);
+    setShowMessages(true);
+  };
+
+  // Open chat list
+  const handleOpenChatList = () => {
+    setShowChatList(true);
   };
 
   // PayPal Integration Functions
@@ -1519,6 +1605,13 @@ function GuestPage({ onLogout }) {
                 </button>
               </div>
             </div>
+            {/* <button
+              onClick={handleOpenChatList}
+              className="hidden sm:flex items-center gap-2 border px-3 py-2 rounded-full hover:shadow"
+            >
+              <FaRegCommentDots className="text-blue-500" />
+              <span className="text-sm">Messages</span>
+            </button> */}
             <button
               onClick={handleProfileEdit}
               className="hidden sm:flex items-center gap-2 border px-3 py-2 rounded-full hover:shadow"
@@ -1705,6 +1798,16 @@ function GuestPage({ onLogout }) {
                   type="text"
                   name="name"
                   value={editProfileData.name}
+                  onChange={handleProfileInputChange}
+                  className="border rounded px-3 py-2 w-full"
+                />
+              </div>
+              <div className="mb-4">
+                <label className="block text-gray-700 font-semibold mb-1">Phone Number</label>
+                <input
+                  type="tel"
+                  name="phone"
+                  value={editProfileData.phone}
                   onChange={handleProfileInputChange}
                   className="border rounded px-3 py-2 w-full"
                 />
@@ -2912,9 +3015,22 @@ function GuestPage({ onLogout }) {
             onClose={() => {
               setShowMessages(false);
               setSelectedHost(null);
+              setSelectedProperty(null);
             }}
             currentUser={auth.currentUser}
             otherUser={selectedHost}
+            userType="guest"
+            propertyInfo={selectedProperty}
+          />
+        )}
+
+        {/* Chat List Modal */}
+        {showChatList && (
+          <ChatList
+            isOpen={showChatList}
+            onClose={() => setShowChatList(false)}
+            currentUser={auth.currentUser}
+            onSelectChat={handleSelectChat}
             userType="guest"
           />
         )}

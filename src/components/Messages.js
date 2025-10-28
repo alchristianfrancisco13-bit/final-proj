@@ -8,21 +8,30 @@ import {
   onSnapshot, 
   serverTimestamp,
   doc,
-  getDoc
+  getDoc,
+  setDoc,
+  updateDoc
 } from 'firebase/firestore';
 import { db, auth } from '../firebase';
 import { FaPaperPlane, FaUser, FaTimes } from 'react-icons/fa';
 
-export default function Messages({ isOpen, onClose, currentUser, otherUser, userType }) {
+export default function Messages({ isOpen, onClose, currentUser, otherUser, userType, propertyInfo }) {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // Create a unique chat ID based on user IDs
+  // Create a unique chat ID based on user IDs and property ID
   const getChatId = () => {
     if (!currentUser || !otherUser) return null;
     const ids = [currentUser.uid, otherUser.uid].sort();
-    return `${ids[0]}_${ids[1]}`;
+    const baseChatId = `${ids[0]}_${ids[1]}`;
+    
+    // If property info exists, include property ID to create separate conversations per property
+    if (propertyInfo && propertyInfo.id) {
+      return `${baseChatId}_${propertyInfo.id}`;
+    }
+    
+    return baseChatId;
   };
 
   // Send message
@@ -37,20 +46,73 @@ export default function Messages({ isOpen, onClose, currentUser, otherUser, user
         chatId,
         senderId: currentUser.uid,
         senderName: currentUser.displayName || currentUser.email?.split('@')[0] || 'User',
+        senderEmail: currentUser.email,
         receiverId: otherUser.uid,
         receiverName: otherUser.displayName || otherUser.email?.split('@')[0] || 'User',
+        receiverEmail: otherUser.email,
         message: newMessage.trim(),
         timestamp: serverTimestamp(),
-        read: false
+        read: false,
+        messageType: 'text',
+        propertyInfo: propertyInfo || null
       };
 
+      // Save message to Firestore
       await addDoc(collection(db, 'messages'), messageData);
+      
+      // Update chat metadata
+      await updateChatMetadata(chatId, currentUser, otherUser, newMessage.trim());
+      
       setNewMessage('');
     } catch (error) {
       console.error('Error sending message:', error);
       alert('Failed to send message. Please try again.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Update chat metadata for better organization
+  const updateChatMetadata = async (chatId, sender, receiver, lastMessage) => {
+    try {
+      const chatRef = doc(db, 'chats', chatId);
+      const chatDoc = await getDoc(chatRef);
+      
+      const chatData = {
+        chatId,
+        participants: [sender.uid, receiver.uid],
+        participantNames: {
+          [sender.uid]: sender.displayName || sender.email?.split('@')[0] || 'User',
+          [receiver.uid]: receiver.displayName || receiver.email?.split('@')[0] || 'User'
+        },
+        participantEmails: {
+          [sender.uid]: sender.email,
+          [receiver.uid]: receiver.email
+        },
+        lastMessage: lastMessage,
+        lastMessageTime: serverTimestamp(),
+        lastMessageSender: sender.uid,
+        propertyInfo: propertyInfo || null,
+        updatedAt: serverTimestamp()
+      };
+
+      if (chatDoc.exists()) {
+        // Update existing chat
+        await updateDoc(chatRef, {
+          lastMessage: lastMessage,
+          lastMessageTime: serverTimestamp(),
+          lastMessageSender: sender.uid,
+          updatedAt: serverTimestamp()
+        });
+      } else {
+        // Create new chat
+        await setDoc(chatRef, {
+          ...chatData,
+          createdAt: serverTimestamp()
+        });
+      }
+    } catch (error) {
+      console.error('Error updating chat metadata:', error);
     }
   };
 
@@ -97,6 +159,11 @@ export default function Messages({ isOpen, onClose, currentUser, otherUser, user
               </h3>
               <p className="text-sm text-gray-500">
                 {userType === 'guest' ? 'Host' : 'Guest'}
+                {propertyInfo && (
+                  <span className="ml-2 text-blue-600">
+                    • {propertyInfo.name}
+                  </span>
+                )}
               </p>
             </div>
           </div>

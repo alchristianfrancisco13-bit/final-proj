@@ -29,6 +29,7 @@ import {
   FaPercentage, FaQrcode, FaMobile, FaDesktop, FaTablet
 } from "react-icons/fa";
 import Messages from "./components/Messages";
+import ChatList from "./components/ChatList";
 
 function HostPage({ onLogout }) {
 
@@ -49,7 +50,9 @@ useEffect(() => {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [showAllBookings, setShowAllBookings] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
+  const [showChatList, setShowChatList] = useState(false);
   const [selectedGuest, setSelectedGuest] = useState(null);
+  const [selectedProperty, setSelectedProperty] = useState(null);
 
   // Real-time listings, bookings, and dashboard updates
   useEffect(() => {
@@ -608,7 +611,32 @@ useEffect(() => {
       displayName: booking.guestName || 'Guest',
       email: booking.guestEmail || 'guest@stayhub.com'
     });
+    
+    // Find the property information from the booking
+    const property = listings.find(listing => listing.id === booking.listingId);
+    if (property) {
+      setSelectedProperty({
+        id: property.id,
+        name: property.title || property.name || property.propertyName || 'Property',
+        type: property.type || 'accommodation',
+        location: property.location || property.address || 'Location not specified'
+      });
+    }
+    
     setShowMessages(true);
+  };
+
+  // Handle chat selection from chat list
+  const handleSelectChat = (otherUser, propertyInfo = null) => {
+    setSelectedGuest(otherUser);
+    setSelectedProperty(propertyInfo);
+    setShowChatList(false);
+    setShowMessages(true);
+  };
+
+  // Open chat list
+  const handleOpenChatList = () => {
+    setShowChatList(true);
   };
 
   // 6. Dashboard Today & Upcoming
@@ -837,7 +865,7 @@ useEffect(() => {
                   Calendar
                 </button>
                 <button 
-                  onClick={() => setActiveTab("messages")}
+                  onClick={handleOpenChatList}
                   className={`py-2 px-3 rounded-lg font-medium text-sm transition ${
                     activeTab === "messages" 
                       ? "bg-pink-100 text-pink-600" 
@@ -1027,7 +1055,7 @@ useEffect(() => {
                     <span className="text-sm font-medium text-pink-700">Add Listing</span>
                   </button>
                   <button 
-                    onClick={() => setActiveTab("messages")}
+                    onClick={handleOpenChatList}
                     className="flex items-center gap-3 p-4 bg-blue-50 rounded-lg hover:bg-blue-100 transition"
                   >
                     <FaMessage className="text-blue-600" />
@@ -2409,9 +2437,22 @@ useEffect(() => {
           onClose={() => {
             setShowMessages(false);
             setSelectedGuest(null);
+            setSelectedProperty(null);
           }}
           currentUser={auth.currentUser}
           otherUser={selectedGuest}
+          userType="host"
+          propertyInfo={selectedProperty}
+        />
+      )}
+
+      {/* Chat List Modal */}
+      {showChatList && (
+        <ChatList
+          isOpen={showChatList}
+          onClose={() => setShowChatList(false)}
+          currentUser={auth.currentUser}
+          onSelectChat={handleSelectChat}
           userType="host"
         />
       )}

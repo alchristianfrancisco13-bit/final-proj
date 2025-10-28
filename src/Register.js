@@ -11,6 +11,8 @@ import { useEffect } from "react";
 function Register() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
   const [role, setRole] = useState("guest");
   const [showOTPVerification, setShowOTPVerification] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -24,7 +26,7 @@ function Register() {
 
   // Validate form before proceeding to OTP verification
   const validateForm = () => {
-    if (!email || !password) {
+    if (!email || !password || !name || !phone) {
       setError("Please fill in all fields");
       return false;
     }
@@ -34,6 +36,14 @@ function Register() {
     }
     if (!email.includes("@")) {
       setError("Please enter a valid email address");
+      return false;
+    }
+    if (name.trim().length < 2) {
+      setError("Name must be at least 2 characters long");
+      return false;
+    }
+    if (phone.trim().length < 10) {
+      setError("Please enter a valid phone number");
       return false;
     }
     if (!acceptedTerms) {
@@ -78,7 +88,7 @@ function Register() {
   };
 
   // Complete registration after OTP verification
-  const completeRegistration = async () => {
+  const completeRegistration = async (userInfo) => {
     setIsLoading(true);
     setError("");
 
@@ -106,7 +116,9 @@ function Register() {
       // Save user data to Firestore
       await setDoc(doc(db, FIRESTORE_COLLECTIONS.USERS, newUser.uid), {
         email: newUser.email,
-        role: role,
+        name: userInfo.name.trim(),
+        phone: userInfo.phone.trim(),
+        role: userInfo.role,
         createdAt: new Date(),
         emailVerified: true,
         otpVerifiedAt: otpData.verifiedAt
@@ -148,6 +160,8 @@ function Register() {
       <OTPVerification
         email={email}
         role={role}
+        name={name}
+        phone={phone}
         onVerificationSuccess={completeRegistration}
         onBack={goBackToRegistration}
       />
@@ -203,6 +217,34 @@ function Register() {
               placeholder="Enter your password"
               className="bg-transparent outline-none py-2 w-full text-[#2d3a4e]"
               onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="w-full mb-4">
+          <label className="block text-[#2d3a4e] font-semibold mb-1">Full Name</label>
+          <div className="flex items-center border border-[#e0c98d] rounded-lg px-3 bg-[#f8f6f1]">
+            <svg className="w-5 h-5 text-[#bfa14a] mr-2" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+            </svg>
+            <input
+              type="text"
+              placeholder="Enter your full name"
+              className="bg-transparent outline-none py-2 w-full text-[#2d3a4e]"
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="w-full mb-4">
+          <label className="block text-[#2d3a4e] font-semibold mb-1">Phone Number</label>
+          <div className="flex items-center border border-[#e0c98d] rounded-lg px-3 bg-[#f8f6f1]">
+            <svg className="w-5 h-5 text-[#bfa14a] mr-2" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+            </svg>
+            <input
+              type="tel"
+              placeholder="Enter your phone number"
+              className="bg-transparent outline-none py-2 w-full text-[#2d3a4e]"
+              onChange={(e) => setPhone(e.target.value)}
             />
           </div>
         </div>
