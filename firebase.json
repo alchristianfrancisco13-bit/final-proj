@@ -7,10 +7,8 @@
       "**/node_modules/**"
     ],
     "rewrites": [
-      {
-        "source": "**",
-        "destination": "/index.html"
-      }
-    ]
+        { "source": "/__/auth/**", "destination": "/__/auth/**" },
+        { "source": "**", "destination": "/index.html" }
+      ]
   }
 }

@@ -53,6 +53,7 @@ useEffect(() => {
   const [showChatList, setShowChatList] = useState(false);
   const [selectedGuest, setSelectedGuest] = useState(null);
   const [selectedProperty, setSelectedProperty] = useState(null);
+  const [recentChats, setRecentChats] = useState([]);
 
   // Real-time listings, bookings, and dashboard updates
   useEffect(() => {
@@ -639,6 +640,26 @@ useEffect(() => {
     setShowChatList(true);
   };
 
+  // Subscribe to chats for persistent message history
+  useEffect(() => {
+    if (!auth.currentUser?.uid) return;
+    try {
+      const chatsRef = collection(db, 'chats');
+      const qChats = query(
+        chatsRef,
+        where('participants', 'array-contains', auth.currentUser.uid),
+        orderBy('updatedAt', 'desc')
+      );
+      const unsub = onSnapshot(qChats, (snapshot) => {
+        const items = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        setRecentChats(items);
+      });
+      return () => unsub();
+    } catch (e) {
+      // ignore
+    }
+  }, [auth.currentUser?.uid]);
+
   // 6. Dashboard Today & Upcoming
   const updateDashboard = () => {
     const todayBookings = listings.filter(l => 
@@ -815,7 +836,7 @@ useEffect(() => {
   }, [auth.currentUser]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-100 via-purple-100 to-pink-100 py-10 px-2 overflow-x-hidden">
+<div className="min-h-screen bg-gradient-to-br from-yellow-50 via-amber-50 to-white py-10 px-2 overflow-x-hidden">
       <div className="max-w-6xl mx-auto relative">
         {/* Airbnb-style Header */}
         <div className="bg-white shadow-sm rounded-lg p-6 mb-8">
@@ -823,7 +844,7 @@ useEffect(() => {
             {/* Logo and Navigation */}
             <div className="flex items-center gap-8">
           <div className="flex items-center gap-3">
-                <div className="w-12 h-12 bg-pink-500 rounded-full flex items-center justify-center">
+                <div className="w-12 h-12 bg-yellow-400 rounded-full flex items-center justify-center">
                   <span className="text-white font-bold text-xl">H</span>
                 </div>
             <div>
@@ -838,7 +859,7 @@ useEffect(() => {
                   onClick={() => setActiveTab("overview")}
                   className={`py-2 px-3 rounded-lg font-medium text-sm transition ${
                     activeTab === "overview" 
-                      ? "bg-pink-100 text-pink-600" 
+                      ? "bg-yellow-100 text-yellow-700" 
                       : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
                   }`}
                 >
@@ -848,7 +869,7 @@ useEffect(() => {
                   onClick={() => setActiveTab("listings")}
                   className={`py-2 px-3 rounded-lg font-medium text-sm transition ${
                     activeTab === "listings" 
-                      ? "bg-pink-100 text-pink-600" 
+                      ? "bg-yellow-100 text-yellow-700" 
                       : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
                   }`}
                 >
@@ -858,7 +879,7 @@ useEffect(() => {
                   onClick={() => setActiveTab("calendar")}
                   className={`py-2 px-3 rounded-lg font-medium text-sm transition ${
                     activeTab === "calendar" 
-                      ? "bg-pink-100 text-pink-600" 
+                      ? "bg-yellow-100 text-yellow-700" 
                       : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
                   }`}
                 >
@@ -868,7 +889,7 @@ useEffect(() => {
                   onClick={handleOpenChatList}
                   className={`py-2 px-3 rounded-lg font-medium text-sm transition ${
                     activeTab === "messages" 
-                      ? "bg-pink-100 text-pink-600" 
+                      ? "bg-yellow-100 text-yellow-700" 
                       : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
                   }`}
                 >
@@ -878,7 +899,7 @@ useEffect(() => {
                   onClick={() => setActiveTab("earnings")}
                   className={`py-2 px-3 rounded-lg font-medium text-sm transition ${
                     activeTab === "earnings" 
-                      ? "bg-pink-100 text-pink-600" 
+                      ? "bg-yellow-100 text-yellow-700" 
                       : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
                   }`}
                 >
@@ -906,7 +927,7 @@ useEffect(() => {
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium">{profile.name}</span>
                     {profile.superhost && (
-                      <span className="bg-pink-100 text-pink-600 px-2 py-1 rounded-full text-xs font-medium">
+                      <span className="bg-yellow-100 text-yellow-700 px-2 py-1 rounded-full text-xs font-medium">
                         Superhost
                       </span>
                     )}
@@ -974,7 +995,7 @@ useEffect(() => {
             <div>
                     <p className="text-sm font-medium text-gray-600">Response Rate</p>
                     <p className="text-2xl font-bold text-gray-900">{dashboard.responseRate || "98"}%</p>
-                    <p className="text-sm text-pink-600 flex items-center gap-1">
+                    <p className="text-sm text-yellow-700 flex items-center gap-1">
                       <FaMessage />
                       {dashboard.responseTime || "<1hr"}
                     </p>
@@ -990,7 +1011,7 @@ useEffect(() => {
               <div className="bg-white rounded-xl shadow-lg p-6">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-lg font-semibold text-gray-900">Recent Bookings</h3>
-                  <button onClick={() => setShowAllBookings(true)} className="text-sm text-pink-600 hover:text-pink-700 font-medium">
+                  <button onClick={() => setShowAllBookings(true)} className="text-sm text-yellow-700 hover:text-pink-700 font-medium">
                     View All
                   </button>
                 </div>
@@ -1002,8 +1023,8 @@ useEffect(() => {
                       .map((booking, idx) => (
                         <div key={booking.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-pink-100 rounded-full flex items-center justify-center">
-                              <span className="text-pink-600 font-semibold text-sm">
+                        <div className="w-10 h-10 bg-yellow-100 rounded-full flex items-center justify-center">
+                              <span className="text-yellow-700 font-semibold text-sm">
                                 {booking.guestName && booking.guestName !== 'Guest User' ? booking.guestName.split(' ')[0][0] : 
                                  booking.guestEmail ? booking.guestEmail.split('@')[0][0].toUpperCase() : 'G'}
                               </span>
@@ -1049,9 +1070,9 @@ useEffect(() => {
                 <div className="grid grid-cols-2 gap-3">
                   <button 
                     onClick={() => setShowAddListing(true)}
-                    className="flex items-center gap-3 p-4 bg-pink-50 rounded-lg hover:bg-pink-100 transition"
+                    className="flex items-center gap-3 p-4 bg-pink-50 rounded-lg hover:bg-yellow-100 transition"
                   >
-                    <FaPlus className="text-pink-600" />
+                    <FaPlus className="text-yellow-700" />
                     <span className="text-sm font-medium text-pink-700">Add Listing</span>
                   </button>
                   <button 
@@ -1099,7 +1120,7 @@ useEffect(() => {
               </div>
               <button 
                 onClick={() => setShowAddListing(true)}
-                className="bg-pink-500 text-white px-6 py-3 rounded-lg hover:bg-pink-600 transition flex items-center gap-2"
+                className="bg-yellow-400 text-white px-6 py-3 rounded-lg hover:bg-pink-600 transition flex items-center gap-2"
               >
                 <FaPlus />
                 Add New Listing
@@ -1124,7 +1145,7 @@ useEffect(() => {
                         {listing.status}
                       </span>
                       {listing.superhost && (
-                        <span className="px-3 py-1 rounded-full text-xs font-medium bg-pink-100 text-pink-700">
+                        <span className="px-3 py-1 rounded-full text-xs font-medium bg-yellow-100 text-pink-700">
                           Superhost
                         </span>
                       )}
@@ -1236,7 +1257,7 @@ useEffect(() => {
                       </button>
                       <button 
                         onClick={() => handleEditListing(listing)}
-                        className="flex-1 bg-pink-100 text-pink-700 px-3 py-2 rounded-lg text-sm hover:bg-pink-200 transition"
+                        className="flex-1 bg-yellow-100 text-pink-700 px-3 py-2 rounded-lg text-sm hover:bg-pink-200 transition"
                       >
                         Edit
                       </button>
@@ -1498,6 +1519,51 @@ useEffect(() => {
           </div>
           {/* Right: Messages, Calendar, Payments, Profile */}
           <div className="space-y-8">
+
+            {/* Message History (persistent) */}
+            <div className="bg-white rounded-xl shadow p-6">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <FaComments className="text-blue-500" />
+                  <span className="font-semibold">Message History</span>
+                </div>
+                <button onClick={handleOpenChatList} className="text-sm text-blue-600 hover:underline">Open Messages</button>
+              </div>
+              {recentChats.length === 0 ? (
+                <div className="text-gray-500 text-sm">No conversations yet.</div>
+              ) : (
+                <div className="divide-y rounded-lg border">
+                  {recentChats.slice(0,6).map((chat) => {
+                    const otherId = (chat.participants || []).find((id) => id !== auth.currentUser?.uid);
+                    const otherUser = {
+                      uid: otherId,
+                      displayName: chat.participantNames?.[otherId] || 'User',
+                      email: chat.participantEmails?.[otherId] || 'user@example.com'
+                    };
+                    return (
+                      <button
+                        key={chat.id}
+                        onClick={() => handleSelectChat(otherUser, chat.propertyInfo || null)}
+                        className="w-full text-left p-3 hover:bg-gray-50"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="truncate">
+                            <div className="font-medium truncate">{otherUser.displayName}</div>
+                            {chat.propertyInfo?.name && (
+                              <div className="text-xs text-blue-600 truncate">📍 {chat.propertyInfo.name}</div>
+                            )}
+                            <div className="text-sm text-gray-600 truncate">{chat.lastMessage || 'No messages yet'}</div>
+                          </div>
+                          <div className="text-xs text-gray-500 ml-2 whitespace-nowrap">
+                            {chat.lastMessageTime?.toDate?.()?.toLocaleString?.() || ''}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
 
             {/* Payment Methods */}
             <div className="bg-white rounded-xl shadow p-6">
@@ -1775,7 +1841,7 @@ useEffect(() => {
               </button>
               <button
                 onClick={handleUpdateListing}
-                className="flex-1 bg-pink-500 text-white px-4 py-3 rounded-lg hover:bg-pink-600 transition font-semibold flex items-center gap-2"
+                className="flex-1 bg-yellow-400 text-white px-4 py-3 rounded-lg hover:bg-pink-600 transition font-semibold flex items-center gap-2"
               >
                 <FaSave />
                 Update Listing
@@ -1981,7 +2047,7 @@ useEffect(() => {
               </button>
               <button
                 onClick={handleAddNewListing}
-                className="flex-1 bg-pink-500 text-white px-4 py-3 rounded-lg hover:bg-pink-600 transition font-semibold flex items-center gap-2"
+                className="flex-1 bg-yellow-400 text-white px-4 py-3 rounded-lg hover:bg-pink-600 transition font-semibold flex items-center gap-2"
               >
                 <FaPlus />
                 Publish Listing
@@ -2351,8 +2417,8 @@ useEffect(() => {
                     <div key={booking.id} className="bg-gray-50 rounded-lg p-4">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 bg-pink-100 rounded-full flex items-center justify-center">
-                            <span className="text-pink-600 font-semibold">
+                          <div className="w-12 h-12 bg-yellow-100 rounded-full flex items-center justify-center">
+                            <span className="text-yellow-700 font-semibold">
                               {booking.guestName && booking.guestName !== 'Guest User' ? booking.guestName.split(' ')[0][0] : 
                                booking.guestEmail ? booking.guestEmail.split('@')[0][0].toUpperCase() : 'G'}
                             </span>

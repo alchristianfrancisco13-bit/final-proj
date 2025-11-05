@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { 
   collection, addDoc, doc, updateDoc, getDocs, query, 
   where, onSnapshot, Timestamp, serverTimestamp, getDoc,
-  increment, arrayUnion 
+  increment, arrayUnion, setDoc, deleteDoc 
 } from "firebase/firestore";
 import { db, auth } from "./firebase";
 import { 
@@ -18,6 +18,7 @@ import { updateEmail, sendEmailVerification, reauthenticateWithCredential, Email
 import { updateListingMetrics } from "./utils/listingMetrics";
 import Messages from "./components/Messages";
 import ChatList from "./components/ChatList";
+
 
 function GuestPage({ onLogout }) {
 
@@ -251,6 +252,7 @@ function GuestPage({ onLogout }) {
       return [];
     }
   });
+  const [searchQuery, setSearchQuery] = useState("");
   const [search, setSearch] = useState("");
   const [firebaseListings, setFirebaseListings] = useState([]);
   const [bookings, setBookings] = useState([]);
@@ -263,6 +265,7 @@ function GuestPage({ onLogout }) {
   });
   const [searchResults, setSearchResults] = useState([]);
   const [showBookingDetails, setShowBookingDetails] = useState(null);
+  const [showAllBookings, setShowAllBookings] = useState(false);
   const [showWishlist, setShowWishlist] = useState(false);
   const [activeCategory, setActiveCategory] = useState("All");
   const [guestCount, setGuestCount] = useState(2);
@@ -379,27 +382,61 @@ function GuestPage({ onLogout }) {
     );
   };
 
-  // Add to favorites
-  const handleAddFavorite = (listing) => {
-    if (!favorites.find((fav) => fav.id === listing.id)) {
-      setFavorites([...favorites, listing]);
-    }
-  };
+        // Add to favorites (and save to Firestore)
+      const handleAddFavorite = async (listing) => {
+        const userId = auth.currentUser?.uid;
+        if (!userId) return alert("Please log in to add favorites.");
 
-  const isFavorited = (id) => favorites.some((f) => f.id === id);
+        const alreadyFav = favorites.find((fav) => fav.id === listing.id);
+        if (alreadyFav) return;
 
-  const toggleFavorite = (listing) => {
-    if (isFavorited(listing.id)) {
-      handleRemoveFavorite(listing.id);
-    } else {
-      handleAddFavorite(listing);
-    }
-  };
+        try {
+          // Save to Firestore only — let onSnapshot handle UI update
+          await setDoc(doc(db, "users", userId, "favorites", listing.id), listing);
+          console.log("✅ Favorite added to Firestore");
+        } catch (error) {
+          console.error("Error adding favorite:", error);
+        }
+      };
 
-  // Remove from favorites
-  const handleRemoveFavorite = (id) => {
-    setFavorites(favorites.filter((fav) => fav.id !== id));
-  };
+// Remove from favorites (unheart)
+const handleRemoveFavorite = async (id) => {
+  const userId = auth.currentUser?.uid;
+  if (!userId) return;
+
+  try {
+    await deleteDoc(doc(db, "users", userId, "favorites", id));
+    setFavorites((prev) => prev.filter((fav) => fav.id !== id));
+  } catch (error) {
+    console.error("Error removing favorite:", error);
+  }
+};
+
+// Toggle favorite (heart/unheart)
+const toggleFavorite = (listing) => {
+  if (isFavorited(listing.id)) {
+    handleRemoveFavorite(listing.id);
+  } else {
+    handleAddFavorite(listing);
+  }
+};
+
+// Check if favorited
+const isFavorited = (id) => favorites.some((f) => f.id === id);
+
+// --- Sync favorites from Firestore in real time ---
+useEffect(() => {
+  const userId = auth.currentUser?.uid;
+  if (!userId) return;
+
+  const favRef = collection(db, "users", userId, "favorites");
+  const unsub = onSnapshot(favRef, (snapshot) => {
+    const favs = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    setFavorites(favs);
+  });
+
+  return () => unsub();
+}, [auth.currentUser]);
 
   // Handle opening the rating modal
   const handleOpenRating = (booking) => {
@@ -561,294 +598,294 @@ function GuestPage({ onLogout }) {
 
   // Enhanced listings with more details for Airbnb-style experience
   const listings = [
-    { 
-      id: "L-001", 
-      title: "Cozy Home in Tagaytay", 
-      category: "Home", 
-      img: "/images/cozy home.jpg", 
-      location: "Tagaytay", 
-      amenities: ["Wifi", "Parking", "Kitchen", "AC", "TV", "Shower"], 
-      reviews: 4.8, 
-      calendar: "Available", 
-      pricePerNight: 2990,
-      host: "Maria Santos",
-      description: "Beautiful cozy home with stunning views of Taal Lake. Perfect for families and couples.",
-      photos: [
-        "/images/cozy home.jpg",
-        "/images/cozy home.jpg",
-        "/images/cozy home.jpg"
-      ],
-      coordinates: { lat: 14.1000, lng: 120.9333 }
-    },
-    { 
-      id: "L-002", 
-      title: "Beachfront Experience", 
-      category: "Experience", 
-      img: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop", 
-      location: "Batangas", 
-      amenities: ["Pool", "Breakfast", "Beach Access", "Parking", "Wifi", "Restaurant"], 
-      reviews: 4.5, 
-      calendar: "Available", 
-      pricePerNight: 4590,
-      host: "Juan Dela Cruz",
-      description: "Luxurious beachfront resort with private beach access and infinity pool.",
-      photos: [
-        "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop"
-      ],
-      coordinates: { lat: 13.7563, lng: 121.0583 }
-    },
-    { 
-      id: "L-003", 
-      title: "City Service Apartment", 
-      category: "Service", 
-      img: "https://images.unsplash.com/photo-1505691938895-1758d7feb511?q=80&w=1200&auto=format&fit=crop", 
-      location: "Makati", 
-      amenities: ["AC", "Kitchen", "Wifi", "Parking", "Gym", "Concierge"], 
-      reviews: 4.2, 
-      calendar: "Few slots", 
-      pricePerNight: 3490,
-      host: "Anna Rodriguez",
-      description: "Modern serviced apartment in the heart of Makati business district.",
-      photos: [
-        "https://images.unsplash.com/photo-1505691938895-1758d7feb511?q=80&w=1200&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop"
-      ],
-      coordinates: { lat: 14.5547, lng: 121.0244 }
-    },
-    { 
-      id: "L-004", 
-      title: "Mountain Cabin Retreat", 
-      category: "Home", 
-      img: "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg", 
-      location: "Baguio", 
-      amenities: ["Fireplace", "Wifi", "Kitchen", "Parking", "Mountain View", "Hot Tub"], 
-      reviews: 4.9, 
-      calendar: "Available", 
-      pricePerNight: 3990,
-      host: "Carlos Mountain",
-      description: "Cozy mountain cabin with fireplace and stunning mountain views.",
-      photos: [
-        "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg",
-        "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg",
-        "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg"
-      ],
-      coordinates: { lat: 16.4023, lng: 120.5960 }
-    },
-    { 
-      id: "L-005", 
-      title: "Luxury Villa Experience", 
-      category: "Experience", 
-      img: "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop", 
-      location: "Boracay", 
-      amenities: ["Private Pool", "Beach Access", "Butler Service", "Spa", "Restaurant", "Wifi"], 
-      reviews: 4.7, 
-      calendar: "Available", 
-      pricePerNight: 8990,
-      host: "Island Resorts",
-      description: "Exclusive luxury villa with private pool and butler service.",
-      photos: [
-        "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop"
-      ],
-      coordinates: { lat: 11.9674, lng: 121.9248 }
-    },
+    // { 
+    //   id: "L-001", 
+    //   title: "Cozy Home in Tagaytay", 
+    //   category: "Home", 
+    //   img: "/images/cozy home.jpg", 
+    //   location: "Tagaytay", 
+    //   amenities: ["Wifi", "Parking", "Kitchen", "AC", "TV", "Shower"], 
+    //   reviews: 4.8, 
+    //   calendar: "Available", 
+    //   pricePerNight: 2990,
+    //   host: "Maria Santos",
+    //   description: "Beautiful cozy home with stunning views of Taal Lake. Perfect for families and couples.",
+    //   photos: [
+    //     "/images/cozy home.jpg",
+    //     "/images/cozy home.jpg",
+    //     "/images/cozy home.jpg"
+    //   ],
+    //   coordinates: { lat: 14.1000, lng: 120.9333 }
+    // },
+    // { 
+    //   id: "L-002", 
+    //   title: "Beachfront Experience", 
+    //   category: "Experience", 
+    //   img: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop", 
+    //   location: "Batangas", 
+    //   amenities: ["Pool", "Breakfast", "Beach Access", "Parking", "Wifi", "Restaurant"], 
+    //   reviews: 4.5, 
+    //   calendar: "Available", 
+    //   pricePerNight: 4590,
+    //   host: "Juan Dela Cruz",
+    //   description: "Luxurious beachfront resort with private beach access and infinity pool.",
+    //   photos: [
+    //     "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop",
+    //     "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop",
+    //     "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop"
+    //   ],
+    //   coordinates: { lat: 13.7563, lng: 121.0583 }
+    // },
+    // { 
+    //   id: "L-003", 
+    //   title: "City Service Apartment", 
+    //   category: "Service", 
+    //   img: "https://images.unsplash.com/photo-1505691938895-1758d7feb511?q=80&w=1200&auto=format&fit=crop", 
+    //   location: "Makati", 
+    //   amenities: ["AC", "Kitchen", "Wifi", "Parking", "Gym", "Concierge"], 
+    //   reviews: 4.2, 
+    //   calendar: "Few slots", 
+    //   pricePerNight: 3490,
+    //   host: "Anna Rodriguez",
+    //   description: "Modern serviced apartment in the heart of Makati business district.",
+    //   photos: [
+    //     "https://images.unsplash.com/photo-1505691938895-1758d7feb511?q=80&w=1200&auto=format&fit=crop",
+    //     "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop",
+    //     "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop"
+    //   ],
+    //   coordinates: { lat: 14.5547, lng: 121.0244 }
+    // },
+    // { 
+    //   id: "L-004", 
+    //   title: "Mountain Cabin Retreat", 
+    //   category: "Home", 
+    //   img: "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg", 
+    //   location: "Baguio", 
+    //   amenities: ["Fireplace", "Wifi", "Kitchen", "Parking", "Mountain View", "Hot Tub"], 
+    //   reviews: 4.9, 
+    //   calendar: "Available", 
+    //   pricePerNight: 3990,
+    //   host: "Carlos Mountain",
+    //   description: "Cozy mountain cabin with fireplace and stunning mountain views.",
+    //   photos: [
+    //     "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg",
+    //     "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg",
+    //     "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg"
+    //   ],
+    //   coordinates: { lat: 16.4023, lng: 120.5960 }
+    // },
+    // { 
+    //   id: "L-005", 
+    //   title: "Luxury Villa Experience", 
+    //   category: "Experience", 
+    //   img: "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop", 
+    //   location: "Boracay", 
+    //   amenities: ["Private Pool", "Beach Access", "Butler Service", "Spa", "Restaurant", "Wifi"], 
+    //   reviews: 4.7, 
+    //   calendar: "Available", 
+    //   pricePerNight: 8990,
+    //   host: "Island Resorts",
+    //   description: "Exclusive luxury villa with private pool and butler service.",
+    //   photos: [
+    //     "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop",
+    //     "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop",
+    //     "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop"
+    //   ],
+    //   coordinates: { lat: 11.9674, lng: 121.9248 }
+    // },
     // Beach Properties
-    { 
-      id: "L-006", 
-      title: "Oceanfront Beach House", 
-      category: "Beach", 
-      img: "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg", 
-      location: "La Union", 
-      amenities: ["Beach Access", "Ocean View", "Surfboard", "Wifi", "Kitchen", "Parking"], 
-      reviews: 4.9, 
-      calendar: "Available", 
-      pricePerNight: 3990,
-      host: "Surf Paradise",
-      description: "Stunning beachfront house with direct ocean access and surf lessons included.",
-      photos: [
-        "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg",
-        "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg",
-        "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg"
-      ],
-      coordinates: { lat: 16.4023, lng: 120.5960 }
-    },
-    { 
-      id: "L-007", 
-      title: "Tropical Beach Resort", 
-      category: "Beach", 
-      img: "https://images.unsplash.com/photo-1573843981267-be1999ff37cd?q=80&w=1200&auto=format&fit=crop", 
-      location: "Palawan", 
-      amenities: ["Private Beach", "Snorkeling", "Kayak", "Restaurant", "Spa", "Wifi"], 
-      reviews: 4.8, 
-      calendar: "Few slots", 
-      pricePerNight: 5990,
-      host: "Tropical Paradise",
-      description: "Luxurious beach resort with private beach and water activities included.",
-      photos: [
-        "https://images.unsplash.com/photo-1573843981267-be1999ff37cd?q=80&w=1200&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop"
-      ],
-      coordinates: { lat: 9.8349, lng: 118.7384 }
-    },
-    { 
-      id: "L-008", 
-      title: "Seaside Cottage", 
-      category: "Beach", 
-      img: "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg", 
-      location: "Siargao", 
-      amenities: ["Beachfront", "Fishing", "Boat", "Wifi", "Kitchen", "AC"], 
-      reviews: 4.6, 
-      calendar: "Available", 
-      pricePerNight: 3490,
-      host: "Island Life",
-      description: "Cozy seaside cottage perfect for fishing and island hopping adventures.",
-      photos: [
-        "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg",
-        "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg",
-        "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg"
-      ],
-      coordinates: { lat: 9.9133, lng: 126.0519 }
-    },
+    // { 
+    //   id: "L-006", 
+    //   title: "Oceanfront Beach House", 
+    //   category: "Beach", 
+    //   img: "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg", 
+    //   location: "La Union", 
+    //   amenities: ["Beach Access", "Ocean View", "Surfboard", "Wifi", "Kitchen", "Parking"], 
+    //   reviews: 4.9, 
+    //   calendar: "Available", 
+    //   pricePerNight: 3990,
+    //   host: "Surf Paradise",
+    //   description: "Stunning beachfront house with direct ocean access and surf lessons included.",
+    //   photos: [
+    //     "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg",
+    //     "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg",
+    //     "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg"
+    //   ],
+    //   coordinates: { lat: 16.4023, lng: 120.5960 }
+    // },
+    // { 
+    //   id: "L-007", 
+    //   title: "Tropical Beach Resort", 
+    //   category: "Beach", 
+    //   img: "https://images.unsplash.com/photo-1573843981267-be1999ff37cd?q=80&w=1200&auto=format&fit=crop", 
+    //   location: "Palawan", 
+    //   amenities: ["Private Beach", "Snorkeling", "Kayak", "Restaurant", "Spa", "Wifi"], 
+    //   reviews: 4.8, 
+    //   calendar: "Few slots", 
+    //   pricePerNight: 5990,
+    //   host: "Tropical Paradise",
+    //   description: "Luxurious beach resort with private beach and water activities included.",
+    //   photos: [
+    //     "https://images.unsplash.com/photo-1573843981267-be1999ff37cd?q=80&w=1200&auto=format&fit=crop",
+    //     "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop",
+    //     "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop"
+    //   ],
+    //   coordinates: { lat: 9.8349, lng: 118.7384 }
+    // },
+    // { 
+    //   id: "L-008", 
+    //   title: "Seaside Cottage", 
+    //   category: "Beach", 
+    //   img: "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg", 
+    //   location: "Siargao", 
+    //   amenities: ["Beachfront", "Fishing", "Boat", "Wifi", "Kitchen", "AC"], 
+    //   reviews: 4.6, 
+    //   calendar: "Available", 
+    //   pricePerNight: 3490,
+    //   host: "Island Life",
+    //   description: "Cozy seaside cottage perfect for fishing and island hopping adventures.",
+    //   photos: [
+    //     "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg",
+    //     "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg",
+    //     "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg"
+    //   ],
+    //   coordinates: { lat: 9.9133, lng: 126.0519 }
+    // },
     // Countryside Properties
-    { 
-      id: "L-009", 
-      title: "Farmhouse Retreat", 
-      category: "Countryside", 
-      img: "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg", 
-      location: "Baguio", 
-      amenities: ["Farm Tour", "Fresh Produce", "Hiking", "Fireplace", "Wifi", "Parking"], 
-      reviews: 4.8, 
-      calendar: "Available", 
-      pricePerNight: 2490,
-      host: "Mountain Farm",
-      description: "Authentic farmhouse experience with fresh organic produce and farm activities.",
-      photos: [
-        "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg",
-        "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg",
-        "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg"
-      ],
-      coordinates: { lat: 16.4023, lng: 120.5960 }
-    },
-    { 
-      id: "L-010", 
-      title: "Vineyard Villa", 
-      category: "Countryside", 
-      img: "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg", 
-      location: "Tagaytay", 
-      amenities: ["Wine Tasting", "Vineyard Tour", "Garden", "Wifi", "Kitchen", "Parking"], 
-      reviews: 4.7, 
-      calendar: "Available", 
-      pricePerNight: 4590,
-      host: "Vineyard Estate",
-      description: "Elegant villa in a working vineyard with wine tasting and vineyard tours.",
-      photos: [
-        "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg",
-        "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg",
-        "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg"
-      ],
-      coordinates: { lat: 14.1000, lng: 120.9333 }
-    },
-    { 
-      id: "L-011", 
-      title: "Rural Cabin", 
-      category: "Countryside", 
-      img: "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg", 
-      location: "Sagada", 
-      amenities: ["Nature Hiking", "Cave Tour", "Bonfire", "Wifi", "Kitchen", "Hot Tub"], 
-      reviews: 4.9, 
-      calendar: "Few slots", 
-      pricePerNight: 1990,
-      host: "Mountain Guide",
-      description: "Rustic cabin in the mountains with hiking trails and cave exploration.",
-      photos: [
-        "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg",
-        "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg",
-        "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg"
-      ],
-      coordinates: { lat: 17.0833, lng: 120.9000 }
-    },
+    // { 
+    //   id: "L-009", 
+    //   title: "Farmhouse Retreat", 
+    //   category: "Countryside", 
+    //   img: "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg", 
+    //   location: "Baguio", 
+    //   amenities: ["Farm Tour", "Fresh Produce", "Hiking", "Fireplace", "Wifi", "Parking"], 
+    //   reviews: 4.8, 
+    //   calendar: "Available", 
+    //   pricePerNight: 2490,
+    //   host: "Mountain Farm",
+    //   description: "Authentic farmhouse experience with fresh organic produce and farm activities.",
+    //   photos: [
+    //     "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg",
+    //     "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg",
+    //     "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg"
+    //   ],
+    //   coordinates: { lat: 16.4023, lng: 120.5960 }
+    // },
+    // { 
+    //   id: "L-010", 
+    //   title: "Vineyard Villa", 
+    //   category: "Countryside", 
+    //   img: "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg", 
+    //   location: "Tagaytay", 
+    //   amenities: ["Wine Tasting", "Vineyard Tour", "Garden", "Wifi", "Kitchen", "Parking"], 
+    //   reviews: 4.7, 
+    //   calendar: "Available", 
+    //   pricePerNight: 4590,
+    //   host: "Vineyard Estate",
+    //   description: "Elegant villa in a working vineyard with wine tasting and vineyard tours.",
+    //   photos: [
+    //     "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg",
+    //     "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg",
+    //     "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg"
+    //   ],
+    //   coordinates: { lat: 14.1000, lng: 120.9333 }
+    // },
+    // { 
+    //   id: "L-011", 
+    //   title: "Rural Cabin", 
+    //   category: "Countryside", 
+    //   img: "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg", 
+    //   location: "Sagada", 
+    //   amenities: ["Nature Hiking", "Cave Tour", "Bonfire", "Wifi", "Kitchen", "Hot Tub"], 
+    //   reviews: 4.9, 
+    //   calendar: "Few slots", 
+    //   pricePerNight: 1990,
+    //   host: "Mountain Guide",
+    //   description: "Rustic cabin in the mountains with hiking trails and cave exploration.",
+    //   photos: [
+    //     "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg",
+    //     "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg",
+    //     "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg"
+    //   ],
+    //   coordinates: { lat: 17.0833, lng: 120.9000 }
+    // },
     // City Properties
-    { 
-      id: "L-012", 
-      title: "Modern City Loft", 
-      category: "City", 
-      img: "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg", 
-      location: "Makati", 
-      amenities: ["City View", "Gym", "Concierge", "Wifi", "AC", "Parking"], 
-      reviews: 4.5, 
-      calendar: "Available", 
-      pricePerNight: 2990,
-      host: "Urban Living",
-      description: "Stylish loft in the heart of Makati with stunning city views and modern amenities.",
-      photos: [
-        "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg",
-        "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg",
-        "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg"
-      ],
-      coordinates: { lat: 14.5547, lng: 121.0244 }
-    },
-    { 
-      id: "L-013", 
-      title: "Business District Suite", 
-      category: "City", 
-      img: "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop", 
-      location: "BGC", 
-      amenities: ["Business Center", "Meeting Room", "Wifi", "AC", "Restaurant", "Parking"], 
-      reviews: 4.6, 
-      calendar: "Available", 
-      pricePerNight: 3990,
-      host: "Business Suites",
-      description: "Professional suite in BGC perfect for business travelers with meeting facilities.",
-      photos: [
-        "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1505691938895-1758d7feb511?q=80&w=1200&auto=format&fit=crop",
-        "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop"
-      ],
-      coordinates: { lat: 14.5547, lng: 121.0244 }
-    },
-    { 
-      id: "L-014", 
-      title: "Historic City Apartment", 
-      category: "City", 
-      img: "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg", 
-      location: "Intramuros", 
-      amenities: ["Historic Area", "Museum Access", "Wifi", "AC", "Kitchen", "Parking"], 
-      reviews: 4.4, 
-      calendar: "Available", 
-      pricePerNight: 2490,
-      host: "Historic Manila",
-      description: "Charming apartment in historic Intramuros with easy access to museums and landmarks.",
-      photos: [
-        "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg",
-        "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg",
-        "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg"
-      ],
-      coordinates: { lat: 14.5906, lng: 120.9750 }
-    },
-    { 
-      id: "L-015", 
-      title: "Luxury Penthouse", 
-      category: "City", 
-      img: "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg", 
-      location: "Ortigas", 
-      amenities: ["Skyline View", "Rooftop", "Butler", "Wifi", "AC", "Valet"], 
-      reviews: 4.9, 
-      calendar: "Few slots", 
-      pricePerNight: 7990,
-      host: "Luxury Living",
-      description: "Exclusive penthouse with panoramic city views and premium services.",
-      photos: [
-        "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg",
-        "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg",
-        "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg"
-      ],
-      coordinates: { lat: 14.5844, lng: 121.0563 }
-    }
+    // { 
+    //   id: "L-012", 
+    //   title: "Modern City Loft", 
+    //   category: "City", 
+    //   img: "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg", 
+    //   location: "Makati", 
+    //   amenities: ["City View", "Gym", "Concierge", "Wifi", "AC", "Parking"], 
+    //   reviews: 4.5, 
+    //   calendar: "Available", 
+    //   pricePerNight: 2990,
+    //   host: "Urban Living",
+    //   description: "Stylish loft in the heart of Makati with stunning city views and modern amenities.",
+    //   photos: [
+    //     "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg",
+    //     "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg",
+    //     "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg"
+    //   ],
+    //   coordinates: { lat: 14.5547, lng: 121.0244 }
+    // },
+    // { 
+    //   id: "L-013", 
+    //   title: "Business District Suite", 
+    //   category: "City", 
+    //   img: "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop", 
+    //   location: "BGC", 
+    //   amenities: ["Business Center", "Meeting Room", "Wifi", "AC", "Restaurant", "Parking"], 
+    //   reviews: 4.6, 
+    //   calendar: "Available", 
+    //   pricePerNight: 3990,
+    //   host: "Business Suites",
+    //   description: "Professional suite in BGC perfect for business travelers with meeting facilities.",
+    //   photos: [
+    //     "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop",
+    //     "https://images.unsplash.com/photo-1505691938895-1758d7feb511?q=80&w=1200&auto=format&fit=crop",
+    //     "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop"
+    //   ],
+    //   coordinates: { lat: 14.5547, lng: 121.0244 }
+    // },
+    // { 
+    //   id: "L-014", 
+    //   title: "Historic City Apartment", 
+    //   category: "City", 
+    //   img: "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg", 
+    //   location: "Intramuros", 
+    //   amenities: ["Historic Area", "Museum Access", "Wifi", "AC", "Kitchen", "Parking"], 
+    //   reviews: 4.4, 
+    //   calendar: "Available", 
+    //   pricePerNight: 2490,
+    //   host: "Historic Manila",
+    //   description: "Charming apartment in historic Intramuros with easy access to museums and landmarks.",
+    //   photos: [
+    //     "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg",
+    //     "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg",
+    //     "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg"
+    //   ],
+    //   coordinates: { lat: 14.5906, lng: 120.9750 }
+    // },
+    // { 
+    //   id: "L-015", 
+    //   title: "Luxury Penthouse", 
+    //   category: "City", 
+    //   img: "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg", 
+    //   location: "Ortigas", 
+    //   amenities: ["Skyline View", "Rooftop", "Butler", "Wifi", "AC", "Valet"], 
+    //   reviews: 4.9, 
+    //   calendar: "Few slots", 
+    //   pricePerNight: 7990,
+    //   host: "Luxury Living",
+    //   description: "Exclusive penthouse with panoramic city views and premium services.",
+    //   photos: [
+    //     "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg",
+    //     "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg",
+    //     "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg"
+    //   ],
+    //   coordinates: { lat: 14.5844, lng: 121.0563 }
+    // }
   ];
 
   // Available amenities for filtering
@@ -1169,13 +1206,13 @@ function GuestPage({ onLogout }) {
       });
 
       // Add to local state with converted timestamps
-      const localBooking = {
-        ...bookingData,
-        id: newBookingRef.id,
-        createdAt: new Date(),
-        updatedAt: new Date()
-      };
-      setBookings(prev => [localBooking, ...prev]);
+      // const localBooking = {
+      //   ...bookingData,
+      //   id: newBookingRef.id,
+      //   createdAt: new Date(),
+      //   updatedAt: new Date()
+      // };
+      // setBookings(prev => [localBooking, ...prev]);
       
       // Process payment
       setEWalletBalance(prev => prev - total);
@@ -1563,98 +1600,102 @@ function GuestPage({ onLogout }) {
   }, []);
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-gold-50">
       {/* Sticky Airbnb-like Header */}
-      <div className="sticky top-0 z-40 border-b bg-white/90 backdrop-blur">
-        <div className="max-w-7xl mx-auto px-4">
-          <div className="h-20 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <img
-                src={profile.avatar}
-                alt="avatar"
-                className="w-10 h-10 rounded-full border object-cover"
-              />
-              <div className="hidden sm:block">
-                <div className="text-sm text-gray-500">Signed in as</div>
-                <div className="font-semibold">{profile.name}</div>
-              </div>
-            </div>
-            <div className="flex-1 max-w-2xl">
-              <div className="flex items-center rounded-full border shadow-sm px-3 py-2 gap-2">
-                <FaSearch className="text-gray-400" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleAdvancedSearch()}
-                  className="bg-transparent outline-none w-full text-sm"
-                  placeholder={'Where to? Try "Tagaytay"'}
-                />
-                <button
-                  onClick={handleAdvancedSearch}
-                  className="bg-pink-500 text-white text-sm px-3 py-1 rounded-full hover:bg-pink-600 transition"
-                >
-                  Search
-                </button>
-                <button
-                  onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
-                  className="p-2 rounded-full hover:bg-gray-100 transition"
-                  title="Advanced Filters"
-                >
-                  <FaFilter className="text-gray-400" />
-                </button>
-              </div>
-            </div>
-            {/* <button
-              onClick={handleOpenChatList}
-              className="hidden sm:flex items-center gap-2 border px-3 py-2 rounded-full hover:shadow"
-            >
-              <FaRegCommentDots className="text-blue-500" />
-              <span className="text-sm">Messages</span>
-            </button> */}
-            <button
-              onClick={handleProfileEdit}
-              className="hidden sm:flex items-center gap-2 border px-3 py-2 rounded-full hover:shadow"
-            >
-              <FaUserCircle className="text-pink-500" />
-              <span className="text-sm">Edit Profile</span>
-            </button>
-            <button
-              onClick={onLogout}
-              className="hidden sm:flex items-center gap-2 border border-red-200 px-3 py-2 rounded-full hover:shadow hover:bg-red-50 text-red-600"
-            >
-              <FaSignOutAlt className="text-red-500" />
-              <span className="text-sm">Logout</span>
-            </button>
-          </div>
-        </div>
-        {/* Categories bar */}
-        <div className="border-t">
-          <div className="max-w-7xl mx-auto px-4">
-            <div className="flex items-center gap-4 overflow-x-auto no-scrollbar py-3">
-              {[
-                "All",
-                "Home",
-                "Experience",
-                "Service",
-              ].map((cat) => (
-                <button
-                  key={cat}
-                  onClick={() => setActiveCategory(cat)}
-                  className={
-                    (activeCategory === cat
-                      ? "text-pink-600 border-pink-500"
-                      : "text-gray-600 border-transparent") +
-                    " whitespace-nowrap border-b-2 pb-2 text-sm hover:text-pink-600"
-                  }
-                >
-                  {cat}
-                </button>
-              ))}
-            </div>
-          </div>
+      {/* Sticky StayHub Header */}
+<div className="sticky top-0 z-40 border-b bg-white/90 backdrop-blur-md border-white/30 shadow-sm">
+  <div className="max-w-7xl mx-auto px-4">
+    <div className="h-20 flex items-center justify-between gap-4">
+      {/* Left: Profile Info */}
+      <div className="flex items-center gap-3">
+        <img
+          src={profile.avatar}
+          alt="avatar"
+          className="w-10 h-10 rounded-full border-2 border-gold-400 object-cover"
+        />
+        <div className="hidden sm:block">
+          <div className="text-xs text-gray-500">Signed in as</div>
+          <div className="font-semibold text-gold-600">{profile.name}</div>
         </div>
       </div>
+
+      {/* Center: Search Bar */}
+      <div className="flex-1 max-w-2xl">
+        <div className="flex items-center rounded-full border border-gold-200 shadow-sm px-3 py-2 gap-2 bg-white/70 backdrop-blur-sm">
+          <FaSearch className="text-gold-500" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleAdvancedSearch()}
+            className="bg-transparent outline-none w-full text-sm"
+            placeholder={'Where to? Try "Tagaytay"'}
+          />
+          <button
+            onClick={handleAdvancedSearch}
+            className="bg-gold-gradient text-white text-sm px-3 py-1 rounded-full hover:scale-105 transition"
+          >
+            Search
+          </button>
+          <button
+            onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
+            className="p-2 rounded-full hover:bg-gold-50 transition"
+            title="Advanced Filters"
+          >
+            <FaFilter className="text-gold-500" />
+          </button>
+        </div>
+      </div>
+
+      {/* Right: Actions */}
+      <button
+        onClick={handleOpenChatList}
+        className="hidden sm:flex items-center gap-2 border border-blue-200 px-3 py-2 rounded-full hover:shadow hover:bg-blue-50 text-blue-600"
+      >
+        <FaRegCommentDots className="text-blue-500" />
+        <span className="text-sm">Messages</span>
+      </button>
+      <button
+        onClick={handleProfileEdit}
+        className="hidden sm:flex items-center gap-2 border border-gold-200 px-3 py-2 rounded-full hover:shadow hover:bg-gold-50 transition"
+      >
+        <FaUserCircle className="text-gold-500" />
+        <span className="text-sm text-gray-700">Edit Profile</span>
+      </button>
+
+      <button
+        onClick={onLogout}
+        className="hidden sm:flex items-center gap-2 border border-red-200 px-3 py-2 rounded-full hover:shadow hover:bg-red-50 text-red-600"
+      >
+        <FaSignOutAlt className="text-red-500" />
+        <span className="text-sm">Logout</span>
+      </button>
+    </div>
+  </div>
+
+  {/* Categories bar */}
+  <div className="border-t border-gold-100 bg-gold-gradient-light">
+    <div className="max-w-7xl mx-auto px-4">
+      <div className="flex items-center gap-4 overflow-x-auto no-scrollbar py-3">
+        {["All", "Home", "Experience", "Service"].map((cat) => (
+          <button
+            key={cat}
+            onClick={() => setActiveCategory(cat)}
+            className={`whitespace-nowrap border-b-2 pb-2 text-sm transition 
+              ${
+                activeCategory === cat
+                  ? "text-gold-700 border-gold-600 font-semibold"
+                  : "text-gray-600 border-transparent hover:text-gold-600"
+              }`}
+          >
+            {cat}
+          </button>
+        ))}
+      </div>
+    </div>
+  </div>
+</div>
+
 
       <div className="max-w-7xl mx-auto px-4 py-8">
         {/* Enhanced Filter pills under search */}
@@ -1748,13 +1789,13 @@ function GuestPage({ onLogout }) {
                       setSelectedAmenities([]);
                       setActiveCategory("All");
                     }}
-                    className="w-full text-sm text-pink-600 hover:text-pink-700 underline"
+                    className="w-full text-sm text-gold-600 hover:text-gold-700 underline"
                   >
                     Clear all filters
                   </button>
                   <button
                     onClick={handleAdvancedSearch}
-                    className="w-full bg-pink-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-pink-600 transition"
+                    className="w-full bg-gold-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-gold-600 transition"
                   >
                     Apply Filters
                   </button>
@@ -1770,7 +1811,7 @@ function GuestPage({ onLogout }) {
             <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-sm relative">
               <button
                 onClick={() => setShowEditProfile(false)}
-                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-pink-500"
+                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-gold-500"
               >
                 ×
               </button>
@@ -1779,9 +1820,9 @@ function GuestPage({ onLogout }) {
                   <img
                     src={editProfileData.avatar}
                     alt="avatar"
-                    className="w-24 h-24 rounded-full border-4 border-pink-200 shadow object-cover"
+                    className="w-24 h-24 rounded-full border-4 border-gold-200 shadow object-cover"
                   />
-                  <label className="absolute bottom-0 right-0 bg-pink-500 text-white rounded-full p-2 cursor-pointer hover:bg-pink-600 transition">
+                  <label className="absolute bottom-0 right-0 bg-gold-500 text-white rounded-full p-2 cursor-pointer hover:bg-gold-600 transition">
                     <FaCamera />
                     <input
                       type="file"
@@ -1825,7 +1866,7 @@ function GuestPage({ onLogout }) {
               </div>
               <button
                 onClick={handleProfileSave}
-                className="bg-pink-500 text-white px-6 py-2 rounded-full shadow hover:bg-pink-600 transition w-full"
+                className="bg-gold-500 text-white px-6 py-2 rounded-full shadow hover:bg-gold-600 transition w-full"
               >
                 Save
               </button>
@@ -1837,79 +1878,119 @@ function GuestPage({ onLogout }) {
           {searchResults.length > 0 && (
           <div className="mb-10">
             <div className="flex items-center justify-between mb-4">
-              <div className="text-lg font-semibold">
-                Search Results ({searchResults.length} found)
-              </div>
-              <button
-                onClick={() => setSearchResults([])}
-                className="text-sm text-gray-500 hover:text-gray-700 underline"
-              >
-                Clear results
-              </button>
+              <h2 className="font-bold text-lg">Explore stays</h2>
+              <span className="text-sm text-gray-500">
+                {searchResults.length} {searchResults.length === 1 ? "place" : "places"}
+              </span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
               {searchResults.map((l) => (
-                <div key={l.id} className="group">
-                  <div className="relative overflow-hidden rounded-2xl aspect-[4/3] bg-gray-100">
-                    <img src={l.img} alt={l.title} className="h-full w-full object-cover group-hover:scale-105 transition duration-300" />
-                    <button
-                      onClick={() => toggleFavorite(l)}
-                      className="absolute top-3 right-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
-                      aria-label="Toggle favorite"
-                    >
-                      <FaHeart className={isFavorited(l.id) ? "text-pink-600" : "text-gray-400"} />
-                    </button>
-                    <button
-                      onClick={() => setShowShareModal(l)}
-                      className="absolute top-3 left-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
-                      aria-label="Share"
-                    >
-                      <FaShareAlt className="text-gray-400" />
-                    </button>
-                    <div className="absolute bottom-3 left-3 flex items-center gap-1 text-white bg-black/50 px-2 py-1 rounded-full text-xs">
-                      <FaStar className="text-yellow-300" /> {l.reviews || l.rating || "New"}
-                    </div>
-                    <div className="absolute bottom-3 right-3 bg-white/80 text-xs px-2 py-1 rounded-full">
-                      {l.calendar}
-                    </div>
-                  </div>
-                  <div className="mt-2">
-                    <div className="flex items-center justify-between">
-                      <div className="font-semibold truncate mr-2">{l.title}</div>
-                      <div className="text-sm font-semibold">₱{l.pricePerNight?.toLocaleString?.() || "—"} <span className="text-gray-500 text-xs">night</span></div>
-                    </div>
-                    <div className="text-sm text-gray-500 truncate">{l.location} • {l.category}</div>
-                    <div className="text-xs text-gray-400 mt-1">
-                      Hosted by {l.host}
-                  </div>
-                    <div className="flex items-center gap-1 mt-1">
-                      {l.amenities.slice(0, 3).map((amenity, idx) => (
-                        <span key={idx} className="text-xs bg-gray-100 px-2 py-1 rounded-full">
-                          {amenity}
-                        </span>
-                      ))}
-                      {l.amenities.length > 3 && (
-                        <span className="text-xs text-gray-500">+{l.amenities.length - 3} more</span>
-          )}
-        </div>
-                  <div className="flex gap-2 mt-3">
-                    <button
-                        onClick={() => handleBookListing(l)}
-                        className="flex-1 bg-pink-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-pink-600 transition"
-                    >
-                        Book Now
-                    </button>
-                    <button
-                        onClick={() => handleMessageHost(l)}
-                        className="px-4 py-2 bg-blue-500 text-white rounded-lg text-sm font-semibold hover:bg-blue-600 transition flex items-center gap-1"
-                    >
-                        <FaEnvelope className="text-xs" />
-                        Message
-                    </button>
-                  </div>
+            <div
+              key={l.id}
+              className="group flex flex-col justify-between bg-white rounded-2xl shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-300 h-full"
+            >
+              {/* Image Section */}
+              <div className="relative overflow-hidden rounded-2xl aspect-[4/3] bg-gray-100">
+                <img
+                  src={l.img}
+                  alt={l.title}
+                  className="h-full w-full object-cover group-hover:scale-105 transition duration-300"
+                />
+                <button
+                  onClick={() => toggleFavorite(l)}
+                  className="absolute top-3 right-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
+                  aria-label="Toggle favorite"
+                >
+                  <FaHeart
+                    className={
+                      isFavorited(l.id) ? "text-gold-600" : "text-gray-400"
+                    }
+                  />
+                </button>
+                <button
+                  onClick={() => setShowShareModal(l)}
+                  className="absolute top-3 left-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
+                  aria-label="Share"
+                >
+                  <FaShareAlt className="text-gray-400" />
+                </button>
+                <div className="absolute bottom-3 left-3 flex items-center gap-1 text-white bg-black/50 px-2 py-1 rounded-full text-xs">
+                  <FaStar className="text-yellow-300" /> {l.reviews || l.rating || "New"}
+                </div>
+                <div className="absolute bottom-3 right-3 bg-white/80 text-xs px-2 py-1 rounded-full">
+                  {l.calendar}
+                </div>
+              </div>
+
+              {/* Map Section (coordinates preferred, fallback to place search) */}
+              {(l?.coordinates?.lat && l?.coordinates?.lng) || (l?.location || l?.title) ? (
+                <div className="mt-2 px-3">
+                  <div className="overflow-hidden rounded-lg border">
+                    <iframe
+                      title={`map-${l.id}`}
+                      src={
+                        l?.coordinates?.lat && l?.coordinates?.lng
+                          ? `https://www.google.com/maps?q=${encodeURIComponent(l.coordinates.lat)},${encodeURIComponent(l.coordinates.lng)}&z=14&output=embed`
+                          : `https://www.google.com/maps?q=${encodeURIComponent(`${l?.title || ''} ${l?.location || ''}`.trim())}&z=14&output=embed`
+                      }
+                      className="w-full h-28"
+                      loading="lazy"
+                      allowFullScreen
+                      referrerPolicy="no-referrer-when-downgrade"
+                    />
                   </div>
                 </div>
-              ))}
+              ) : null}
+
+              {/* Content Section */}
+              <div className="flex flex-col flex-grow mt-2 px-3">
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold truncate mr-2">{l.title}</div>
+                  <div className="text-sm font-semibold">
+                    ₱{l.pricePerNight?.toLocaleString?.() || "—"}
+                    <span className="text-gray-500 text-xs"> /night</span>
+                  </div>
+                </div>
+                <div className="text-sm text-gray-500 truncate">
+                  {l.location} • {l.category}
+                </div>
+                <div className="text-xs text-gray-400 mt-1">Hosted by {l.host}</div>
+
+                <div className="flex flex-wrap items-center gap-1 mt-2">
+                  {l.amenities.slice(0, 3).map((amenity, idx) => (
+                    <span
+                      key={idx}
+                      className="text-xs bg-gray-100 px-2 py-1 rounded-full"
+                    >
+                      {amenity}
+                    </span>
+                  ))}
+                  {l.amenities.length > 3 && (
+                    <span className="text-xs text-gray-500">
+                      +{l.amenities.length - 3} more
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Buttons Section (Always Bottom Aligned) */}
+              <div className="mt-auto flex gap-2 pt-4 px-3 pb-3">
+                <button
+                  onClick={() => handleBookListing(l)}
+                  className="flex-1 bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded-lg shadow-md transition"
+                >
+                  Book Now
+                </button>
+                <button
+                  onClick={() => handleMessageHost(l)}
+                  className="flex-1 bg-blue-500 text-white rounded-lg text-sm font-semibold hover:bg-blue-600 transition flex items-center justify-center gap-1"
+                >
+                  <FaEnvelope className="text-xs" />
+                  Message
+                </button>
+              </div>
+            </div>
+          ))}
             </div>
           </div>
         )}
@@ -1917,79 +1998,130 @@ function GuestPage({ onLogout }) {
         {/* Enhanced Explore Grid */}
         <div className="mb-12">
           <div className="flex items-center justify-between mb-4">
-            <div className="font-bold text-xl">Explore stays</div>
+            {/* <div className="font-bold text-xl">Explore stays</div>
             <div className="text-sm text-gray-500">
               {searchResults.filter(l => activeCategory === "All" ? true : l.category === activeCategory).length} places
-            </div>
+            </div> */}
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-            {/* Display filtered search results */}
-            {searchResults.filter((l) =>
-              activeCategory === "All" ? true : l.category === activeCategory
-            )
-              .map((l) => (
-                <div key={l.id} className="group cursor-pointer">
-                  <div className="relative overflow-hidden rounded-2xl aspect-[4/3] bg-gray-100">
-                    <img src={l.img} alt={l.title} className="h-full w-full object-cover group-hover:scale-105 transition duration-300" />
-                    <button
-                      onClick={() => toggleFavorite(l)}
-                      className="absolute top-3 right-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
-                      aria-label="Toggle favorite"
-                    >
-                      <FaHeart className={isFavorited(l.id) ? "text-pink-600" : "text-gray-400"} />
-                    </button>
-                    <button
-                      onClick={() => setShowShareModal(l)}
-                      className="absolute top-3 left-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
-                      aria-label="Share"
-                    >
-                      <FaShareAlt className="text-gray-400" />
-                    </button>
-                    <div className="absolute bottom-3 left-3 flex items-center gap-1 text-white bg-black/50 px-2 py-1 rounded-full text-xs">
-                      <FaStar className="text-yellow-300" /> {l.reviews || l.rating || "New"}
+            {/* Display filtered search results only when there's a search query */}
+            {searchQuery ? (
+              searchResults.filter((l) =>
+                activeCategory === "All" ? true : l.category === activeCategory
+              ).length > 0 ? (
+                searchResults
+                  .filter((l) =>
+                    activeCategory === "All" ? true : l.category === activeCategory
+                  )
+                  .map((l) => (
+                    <div key={l.id} className="group cursor-pointer">
+                      <div className="relative overflow-hidden rounded-2xl aspect-[4/3] bg-gray-100">
+                        <img
+                          src={l.img}
+                          alt={l.title}
+                          className="h-full w-full object-cover group-hover:scale-105 transition duration-300"
+                        />
+                        <button
+                          onClick={() => toggleFavorite(l)}
+                          className="absolute top-3 right-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
+                          aria-label="Toggle favorite"
+                        >
+                          <FaHeart
+                            className={
+                              isFavorited(l.id) ? "text-gold-600" : "text-gray-400"
+                            }
+                          />
+                        </button>
+                        <button
+                          onClick={() => setShowShareModal(l)}
+                          className="absolute top-3 left-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
+                          aria-label="Share"
+                        >
+                          <FaShareAlt className="text-gray-400" />
+                        </button>
+                        <div className="absolute bottom-3 left-3 flex items-center gap-1 text-white bg-black/50 px-2 py-1 rounded-full text-xs">
+                          <FaStar className="text-yellow-300" /> {l.reviews || l.rating || "New"}
+                        </div>
+                        <div className="absolute bottom-3 right-3 bg-white/80 text-xs px-2 py-1 rounded-full">
+                          {l.calendar}
+                        </div>
+                      </div>
+                      {(l?.coordinates?.lat && l?.coordinates?.lng) || (l?.location || l?.title) ? (
+                        <div className="mt-2">
+                          <div className="overflow-hidden rounded-lg border">
+                            <iframe
+                              title={`map-${l.id}`}
+                              src={
+                                l?.coordinates?.lat && l?.coordinates?.lng
+                                  ? `https://www.google.com/maps?q=${encodeURIComponent(l.coordinates.lat)},${encodeURIComponent(l.coordinates.lng)}&z=14&output=embed`
+                                  : `https://www.google.com/maps?q=${encodeURIComponent(`${l?.title || ''} ${l?.location || ''}`.trim())}&z=14&output=embed`
+                              }
+                              className="w-full h-28"
+                              loading="lazy"
+                              allowFullScreen
+                              referrerPolicy="no-referrer-when-downgrade"
+                            />
+                          </div>
+                        </div>
+                      ) : null}
+                      <div className="mt-2">
+                        <div className="flex items-center justify-between">
+                          <div className="font-semibold truncate mr-2">{l.title}</div>
+                          <div className="text-sm font-semibold">
+                            ₱{(l.pricePerNight || l.price)?.toLocaleString?.()}{" "}
+                            <span className="text-gray-500 text-xs">night</span>
+                          </div>
+                        </div>
+                        <div className="text-sm text-gray-500 truncate">
+                          {l.location} • {l.category}
+                        </div>
+                        <div className="text-xs text-gray-400 mt-1">Hosted by {l.host}</div>
+                        <div className="flex items-center gap-1 mt-1">
+                          {(l.amenities || []).slice(0, 3).map((amenity, idx) => (
+                            <span
+                              key={idx}
+                              className="text-xs bg-gray-100 px-2 py-1 rounded-full"
+                            >
+                              {amenity}
+                            </span>
+                          ))}
+                          {(l.amenities || []).length > 3 && (
+                            <span className="text-xs text-gray-500">
+                              +{(l.amenities || []).length - 3} more
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <button
+                            onClick={() => handleBookListing(l)}
+                            className="bg-gold-500 hover:bg-gold-600 text-white px-5 py-2 rounded-lg shadow-md transition"
+                          >
+                            Book Now
+                          </button>
+                          <button
+                            onClick={() => handleMessageHost(l)}
+                            className="bg-blue-500 hover:bg-blue-600 text-white px-5 py-2 rounded-lg shadow-md transition flex items-center justify-center gap-1 text-sm"
+                          >
+                            <FaEnvelope className="text-xs" /> Message
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                    <div className="absolute bottom-3 right-3 bg-white/80 text-xs px-2 py-1 rounded-full">
-                      {l.calendar}
-                    </div>
-                  </div>
-                  <div className="mt-2">
-                    <div className="flex items-center justify-between">
-                      <div className="font-semibold truncate mr-2">{l.title}</div>
-                      <div className="text-sm font-semibold">₱{(l.pricePerNight || l.price)?.toLocaleString?.()} <span className="text-gray-500 text-xs">night</span></div>
-                    </div>
-                    <div className="text-sm text-gray-500 truncate">{l.location} • {l.category}</div>
-                    <div className="text-xs text-gray-400 mt-1">
-                      Hosted by {l.host}
-                    </div>
-                    <div className="flex items-center gap-1 mt-1">
-                      {(l.amenities || []).slice(0, 3).map((amenity, idx) => (
-                        <span key={idx} className="text-xs bg-gray-100 px-2 py-1 rounded-full">
-                          {amenity}
-                        </span>
-                      ))}
-                      {(l.amenities || []).length > 3 && (
-                        <span className="text-xs text-gray-500">+{(l.amenities || []).length - 3} more</span>
-                      )}
-                    </div>
-                    <button
-                      onClick={() => handleBookListing(l)}
-                      className="w-full mt-3 bg-pink-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-pink-600 transition"
-                    >
-                      Book Now
-                    </button>
-                  </div>
-                </div>
-              ))}
+                  ))
+              ) : (
+                <div className="text-gray-400 text-center py-8">No results found.</div>
+              )
+            ) : null}
           </div>
         </div>
 
         {/* Upcoming trips removed per user request */}
 
         {/* Wishlists from favorites - horizontal carousel */}
-        <div className="mb-12">
+        {/* <div className="mb-12">
           <div className="flex items-center justify-between mb-2">
             <div className="font-bold text-xl">Wishlists</div>
-            <button onClick={handleShowWishlist} className="text-sm text-pink-600 underline">
+            <button onClick={handleShowWishlist} className="text-sm text-gold-600 underline">
               {showWishlist ? "Hide" : "Show"}
             </button>
           </div>
@@ -2017,17 +2149,17 @@ function GuestPage({ onLogout }) {
               ))}
             </div>
           )}
-        </div>
+        </div> */}
 
         {/* Main Grid: Favorites and Bookings */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
           {/* Favorites */}
           <div>
             <div className="font-bold text-lg mb-2 flex items-center gap-2">
-              <FaHeart className="text-pink-400" /> Favorites
+              <FaHeart className="text-gold-400" /> Favorites
               <button
                 onClick={handleShowWishlist}
-                className="ml-auto text-xs text-pink-600 underline"
+                className="ml-auto text-xs text-gold-600 underline"
               >
                 {showWishlist ? "Hide" : "Show"}
               </button>
@@ -2042,12 +2174,17 @@ function GuestPage({ onLogout }) {
                       <div className="font-semibold">{fav.title}</div>
                     </div>
                     <button
-                      onClick={() => handleRemoveFavorite(fav.id)}
-                      className="text-red-400 hover:text-red-600"
-                      title="Remove"
-                    >
-                      <FaTrash />
-                    </button>
+                    onClick={() => toggleFavorite(fav)}
+                    title={isFavorited(fav.id) ? "Unfavorite" : "Add to favorites"}
+                  >
+                    <FaHeart
+                      className={`text-xl transition ${
+                        isFavorited(fav.id)
+                          ? "text-red-500"
+                          : "text-gray-400 hover:text-red-400"
+                      }`}
+                    />
+                  </button>
                   </div>
                 ))}
               </div>
@@ -2167,7 +2304,7 @@ function GuestPage({ onLogout }) {
             <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-md relative">
               <button
                 onClick={() => setShowRatingModal(false)}
-                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-pink-500"
+                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-gold-500"
               >
                 ×
               </button>
@@ -2185,13 +2322,13 @@ function GuestPage({ onLogout }) {
                     value={review}
                     onChange={(e) => setReview(e.target.value)}
                     placeholder="Share your experience..."
-                    className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500 h-32 resize-none"
+                    className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-gold-500 h-32 resize-none"
                   />
                 </div>
                 <button
                   onClick={handleSubmitRating}
                   disabled={rating === 0}
-                  className="w-full bg-pink-500 text-white px-4 py-3 rounded-lg hover:bg-pink-600 transition disabled:bg-gray-300 disabled:cursor-not-allowed"
+                  className="w-full bg-gold-500 text-white px-4 py-3 rounded-lg hover:bg-gold-600 transition disabled:bg-gray-300 disabled:cursor-not-allowed"
                 >
                   Submit Rating
                 </button>
@@ -2206,7 +2343,7 @@ function GuestPage({ onLogout }) {
             <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-md relative">
               <button
                 onClick={handleCloseBookingDetails}
-                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-pink-500"
+                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-gold-500"
               >
                 ×
               </button>
@@ -2300,7 +2437,7 @@ function GuestPage({ onLogout }) {
                 <span className="text-xs text-green-600">{showBookingDetails.status}</span>
               </div>
               <div className="mb-2 flex items-center gap-2">
-                <FaRegCommentDots className="text-pink-400" />
+                <FaRegCommentDots className="text-gold-400" />
                 <span className="text-xs text-gray-500">Share or review your booking!</span>
               </div>
               <button
@@ -2349,7 +2486,7 @@ function GuestPage({ onLogout }) {
             <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-md relative">
               <button
                 onClick={() => setShowEWallet(false)}
-                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-pink-500"
+                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-gold-500"
               >
                 ×
               </button>
@@ -2387,7 +2524,7 @@ function GuestPage({ onLogout }) {
           <div className="bg-white rounded-xl shadow-lg p-6">
             <div className="flex items-center justify-between mb-6">
               <div className="flex items-center gap-3">
-                <FaCog className="text-2xl text-pink-500" />
+                <FaCog className="text-2xl text-gold-500" />
                 <div>
                   <h3 className="text-xl font-bold">Account Settings</h3>
                   <p className="text-sm text-gray-500">Manage your profile, bookings, and preferences</p>
@@ -2395,7 +2532,7 @@ function GuestPage({ onLogout }) {
               </div>
               <button
                 onClick={() => setShowAccountSettings(!showAccountSettings)}
-                className="text-pink-500 hover:text-pink-700 text-sm underline"
+                className="text-gold-500 hover:text-gold-700 text-sm underline"
               >
                 {showAccountSettings ? "Hide" : "Show"} Settings
               </button>
@@ -2406,7 +2543,7 @@ function GuestPage({ onLogout }) {
                 {/* Profile Section */}
                 <div className="bg-gray-50 rounded-lg p-4">
                   <div className="flex items-center gap-2 mb-3">
-                    <FaUserCircle className="text-pink-500" />
+                    <FaUserCircle className="text-gold-500" />
                     <span className="font-semibold">Profile</span>
                   </div>
                   <div className="space-y-2 text-sm">
@@ -2424,7 +2561,7 @@ function GuestPage({ onLogout }) {
                     </div>
                     <button
                       onClick={handleProfileEdit}
-                      className="w-full mt-3 bg-pink-500 text-white px-3 py-2 rounded-lg text-xs hover:bg-pink-600 transition"
+                      className="w-full mt-3 bg-gold-500 text-white px-3 py-2 rounded-lg text-xs hover:bg-gold-600 transition"
                     >
                       Edit Profile
                     </button>
@@ -2455,18 +2592,41 @@ function GuestPage({ onLogout }) {
                       </span>
                     </div>
                     <button
-                      onClick={() => setShowWishlist(false)}
-                      className="w-full mt-3 bg-blue-500 text-white px-3 py-2 rounded-lg text-xs hover:bg-blue-600 transition"
-                    >
-                      View All Bookings
-                    </button>
+                    onClick={() => setShowAllBookings(!showAllBookings)}
+                    className="bg-blue-500 text-white px-4 py-2 rounded w-full mt-3 hover:bg-blue-600 transition"
+                  >
+                    {showAllBookings ? "Hide Bookings" : "View All Bookings"}
+                  </button>
+                    {showAllBookings && (
+                  <div className="mt-6">
+                    <h2 className="text-lg font-semibold mb-3">
+                      You have {bookings.length} {bookings.length === 1 ? "booking" : "bookings"}
+                    </h2>
+                    {bookings.length > 0 ? (
+                      <ul className="space-y-3">
+                        {bookings.map((b) => (
+                          <li key={b.id} className="border p-3 rounded-md shadow-sm">
+                            <div className="font-semibold">{b.title || "Untitled"}</div>
+                            <div className="text-sm text-gray-600">{b.location}</div>
+                            <div className="text-sm text-gray-500">
+                              {b.displayCheckIn} – {b.displayCheckOut} ({b.status})
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-gray-500">No bookings found.</p>
+                    )}
+                  </div>
+                )}
+
                   </div>
                 </div>
 
                 {/* Wishlist Section */}
-                <div className="bg-gray-50 rounded-lg p-4">
+                {/* <div className="bg-gray-50 rounded-lg p-4">
                   <div className="flex items-center gap-2 mb-3">
-                    <FaBookmark className="text-pink-500" />
+                    <FaBookmark className="text-gold-500" />
                     <span className="font-semibold">Wishlist</span>
                   </div>
                   <div className="space-y-2 text-sm">
@@ -2488,12 +2648,12 @@ function GuestPage({ onLogout }) {
                     </div>
                     <button
                       onClick={() => setShowWishlist(!showWishlist)}
-                      className="w-full mt-3 bg-pink-500 text-white px-3 py-2 rounded-lg text-xs hover:bg-pink-600 transition"
+                      className="w-full mt-3 bg-gold-500 text-white px-3 py-2 rounded-lg text-xs hover:bg-gold-600 transition"
                     >
                       {showWishlist ? "Hide" : "Show"} Wishlist
                     </button>
                   </div>
-                </div>
+                </div> */}
               </div>
             )}
           </div>
@@ -2502,8 +2662,8 @@ function GuestPage({ onLogout }) {
         {/* Enhanced Suggestions & Recommendations */}
         <div className="mt-10">
           <div className="flex items-center justify-between mb-4">
-            <div className="font-bold text-lg text-pink-700 flex items-center gap-2">
-              <FaGift className="text-pink-500" />
+            <div className="font-bold text-lg text-gold-700 flex items-center gap-2">
+              <FaGift className="text-gold-500" />
               Suggestions & Recommendations for You
             </div>
             <div className="text-sm text-gray-500">
@@ -2526,7 +2686,7 @@ function GuestPage({ onLogout }) {
                     onClick={() => toggleFavorite(s)}
                     className="absolute top-1 right-1 p-1 rounded-full bg-white/80 hover:bg-white shadow"
                   >
-                    <FaHeart className={isFavorited(s.id) ? "text-pink-600" : "text-gray-400"} />
+                    <FaHeart className={isFavorited(s.id) ? "text-gold-600" : "text-gray-400"} />
                   </button>
                 </div>
                 <div className="font-bold text-center">{s.title}</div>
@@ -2538,7 +2698,7 @@ function GuestPage({ onLogout }) {
                 <div className="text-xs text-gray-500 mb-2 text-center">Amenities: {(s.amenities || []).slice(0, 2).join(", ")}</div>
                 <button
                   onClick={() => handleAddFavorite(s)}
-                  className="text-pink-500 hover:text-pink-700 text-xs flex items-center gap-1 group-hover:bg-pink-50 px-3 py-1 rounded-full transition"
+                  className="text-gold-500 hover:text-gold-700 text-xs flex items-center gap-1 group-hover:bg-gold-50 px-3 py-1 rounded-full transition"
                 >
                   <FaHeart /> Add to Favorites
                 </button>
@@ -2553,12 +2713,12 @@ function GuestPage({ onLogout }) {
             <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-md relative">
               <button
                 onClick={() => setShowShareModal(null)}
-                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-pink-500"
+                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-gold-500"
               >
                 ×
               </button>
               <div className="text-center mb-6">
-                <FaShareAlt className="text-4xl text-pink-400 mx-auto mb-2" />
+                <FaShareAlt className="text-4xl text-gold-400 mx-auto mb-2" />
                 <h3 className="text-xl font-bold">Share {showShareModal.title}</h3>
                 <p className="text-gray-500 text-sm">Choose how you'd like to share</p>
               </div>
@@ -2586,9 +2746,9 @@ function GuestPage({ onLogout }) {
                 </button>
                 <button
                   onClick={() => handleShare(showShareModal, 'instagram')}
-                  className="flex items-center gap-2 p-3 border rounded-lg hover:bg-pink-50 transition"
+                  className="flex items-center gap-2 p-3 border rounded-lg hover:bg-gold-50 transition"
                 >
-                  <FaInstagram className="text-pink-500" />
+                  <FaInstagram className="text-gold-500" />
                   <span className="text-sm">Instagram</span>
                 </button>
                 <button
@@ -2616,7 +2776,7 @@ function GuestPage({ onLogout }) {
             <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-md relative">
               <button
                 onClick={() => setShowBookingShareModal(null)}
-                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-pink-500"
+                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-gold-500"
               >
                 ×
               </button>
@@ -2636,7 +2796,7 @@ function GuestPage({ onLogout }) {
                     <div className="text-xs text-gray-400">
                       {showBookingShareModal.checkIn} to {showBookingShareModal.checkOut}
                     </div>
-                    <div className="text-sm font-semibold text-pink-600">
+                    <div className="text-sm font-semibold text-gold-600">
                       ₱{showBookingShareModal.price?.toLocaleString()}/night
                     </div>
                   </div>
@@ -2667,9 +2827,9 @@ function GuestPage({ onLogout }) {
                 </button>
                 <button
                   onClick={() => handleBookingShare(showBookingShareModal, 'instagram')}
-                  className="flex items-center gap-2 p-3 border rounded-lg hover:bg-pink-50 transition"
+                  className="flex items-center gap-2 p-3 border rounded-lg hover:bg-gold-50 transition"
                 >
-                  <FaInstagram className="text-pink-500" />
+                  <FaInstagram className="text-gold-500" />
                   <span className="text-sm">Instagram</span>
                 </button>
                 <button
@@ -2703,7 +2863,7 @@ function GuestPage({ onLogout }) {
             <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-2xl relative max-h-[90vh] overflow-y-auto">
               <button
                 onClick={() => setShowBookingModal(false)}
-                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-pink-500"
+                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-gold-500"
               >
                 ×
               </button>
@@ -2722,6 +2882,24 @@ function GuestPage({ onLogout }) {
                       <FaStar className="text-yellow-300" /> {selectedListing.reviews}
                     </div>
                   </div>
+                  {(selectedListing?.coordinates?.lat && selectedListing?.coordinates?.lng) || (selectedListing?.location || selectedListing?.title) ? (
+                    <div className="mb-4">
+                      <div className="overflow-hidden rounded-xl border">
+                        <iframe
+                          title={`map-${selectedListing.id}`}
+                          src={
+                            selectedListing?.coordinates?.lat && selectedListing?.coordinates?.lng
+                              ? `https://www.google.com/maps?q=${encodeURIComponent(selectedListing.coordinates.lat)},${encodeURIComponent(selectedListing.coordinates.lng)}&z=14&output=embed`
+                              : `https://www.google.com/maps?q=${encodeURIComponent(`${selectedListing?.title || ''} ${selectedListing?.location || ''}`.trim())}&z=14&output=embed`
+                          }
+                          className="w-full h-40"
+                          loading="lazy"
+                          allowFullScreen
+                          referrerPolicy="no-referrer-when-downgrade"
+                        />
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="space-y-2">
                     <div className="font-semibold text-lg">{selectedListing.title}</div>
                     <div className="text-gray-500">{selectedListing.location} • {selectedListing.category}</div>
@@ -2745,7 +2923,7 @@ function GuestPage({ onLogout }) {
                       value={bookingDates.checkIn}
                       onChange={(e) => setBookingDates(prev => ({ ...prev, checkIn: e.target.value }))}
                       min={new Date().toISOString().split('T')[0]}
-                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-gold-500"
                     />
                   </div>
 
@@ -2756,7 +2934,7 @@ function GuestPage({ onLogout }) {
                       value={bookingDates.checkOut}
                       onChange={(e) => setBookingDates(prev => ({ ...prev, checkOut: e.target.value }))}
                       min={bookingDates.checkIn || new Date().toISOString().split('T')[0]}
-                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-gold-500"
                     />
                   </div>
 
@@ -2765,7 +2943,7 @@ function GuestPage({ onLogout }) {
                     <select
                       value={bookingGuests}
                       onChange={(e) => setBookingGuests(parseInt(e.target.value))}
-                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-gold-500"
                     >
                       {[1, 2, 3, 4, 5, 6, 7, 8].map(num => (
                         <option key={num} value={num}>{num} {num === 1 ? 'guest' : 'guests'}</option>
@@ -2779,7 +2957,7 @@ function GuestPage({ onLogout }) {
                       value={bookingNotes}
                       onChange={(e) => setBookingNotes(e.target.value)}
                       placeholder="Any special requests or notes for your stay..."
-                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500 h-20 resize-none"
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-gold-500 h-20 resize-none"
                     />
                   </div>
 
@@ -2818,7 +2996,7 @@ function GuestPage({ onLogout }) {
                     </button>
                     <button
                       onClick={handleConfirmBooking}
-                      className="flex-1 bg-pink-500 text-white px-4 py-3 rounded-lg hover:bg-pink-600 transition font-semibold"
+                      className="flex-1 bg-gold-500 text-white px-4 py-3 rounded-lg hover:bg-gold-600 transition font-semibold"
                     >
                       Pay with E-wallet
                     </button>
@@ -2835,7 +3013,7 @@ function GuestPage({ onLogout }) {
             <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-md relative text-center">
               <button
                 onClick={handleCloseBookingConfirmation}
-                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-pink-500"
+                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-gold-500"
               >
                 ×
               </button>
@@ -2923,13 +3101,13 @@ function GuestPage({ onLogout }) {
                 </div>
               </div>
 
-              <div className="flex gap-3">
-                <button
-                  onClick={handleCloseBookingConfirmation}
-                  className="flex-1 bg-pink-500 text-white px-4 py-3 rounded-lg hover:bg-pink-600 transition font-semibold"
-                >
-                  View All Bookings
-                </button>
+              <div className="flex justify-center mt-4">
+              <button
+                onClick={handleCloseBookingConfirmation}
+                className="bg-gold-500 text-white font-semibold px-6 py-3 rounded-lg hover:bg-red-600 transition w-48 text-center"
+              >
+                Close
+              </button>
               </div>
             </div>
           </div>
@@ -3037,6 +3215,7 @@ function GuestPage({ onLogout }) {
        
       </div>
     </div>
+    
   );
 }
 

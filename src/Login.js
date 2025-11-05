@@ -46,7 +46,6 @@ function Login() {
 
       console.log("User logged in:", loggedUser.uid);
 
-      // Get role from Firestore
       const userDoc = await getDoc(doc(db, "users", loggedUser.uid));
       if (userDoc.exists()) {
         const savedRole = userDoc.data().role;
@@ -54,7 +53,6 @@ function Login() {
 
         alert(`Login successful as ${savedRole}`);
         
-        // Force a small delay to ensure auth state is updated
         setTimeout(() => {
           if (savedRole === "guest") {
             console.log("Navigating to guest page");
@@ -68,11 +66,9 @@ function Login() {
             console.log("Navigating to admin page");
             console.log("Current URL before navigation:", window.location.href);
             
-            // Navigate to actual admin page
             navigate("/admin");
             console.log("Navigate function called for admin");
             
-            // Also try direct navigation as fallback
             setTimeout(() => {
               console.log("Current URL after navigate:", window.location.href);
               if (window.location.pathname !== "/admin") {
@@ -93,22 +89,31 @@ function Login() {
   };
 
   return (
-    <div
-      className="flex items-center justify-center min-h-screen bg-gradient-to-br from-[#f8f6f1] via-[#e9e7e1] to-[#d1cfc7]"
-      style={{
-        backgroundImage: "url('https://i.pinimg.com/originals/99/02/d4/9902d4dbccf471c1362f7784f6dd5e91.gif')",
-        backgroundSize: "cover",
-        backgroundPosition: "center",
-        backgroundRepeat: "no-repeat"
-      }}
-    >
-      <div className="bg-white/50 shadow-2xl p-10 rounded-3xl w-[410px] flex flex-col items-center border border-[#e0c98d]">
+    <div className="relative flex items-center justify-center min-h-screen overflow-hidden">
+      {/* Background Video */}
+      <video
+        autoPlay
+        loop
+        muted
+        playsInline
+        className="absolute top-0 left-0 w-full h-full object-cover"
+      >
+        <source src="https://cdn.pixabay.com/video/2023/02/17/151054-800027519_large.mp4" type="video/mp4" />
+        Your browser does not support the video tag.
+      </video>
+
+      {/* Dark Overlay para mas readable ang form */}
+      <div className="absolute top-0 left-0 w-full h-full bg-black/30"></div>
+
+      {/* Login Form - with higher z-index */}
+      <div className="relative z-10 bg-white/50 backdrop-blur-sm shadow-2xl p-10 rounded-3xl w-[410px] flex flex-col items-center border border-[#e0c98d]">
         {/* StayHub Logo */}
         <div className="mb-6">
           <img src="logo_stay_hub1.png" alt="StayHub" className="h-20 w-auto" />
         </div>
         <h2 className="text-3xl font-bold mb-1 text-[#2d3a4e] tracking-tight font-serif">Login</h2>
         <p className="mb-7 text-[#bfa14a] text-base font-medium">Sign in to manage your stay</p>
+        
         <div className="w-full mb-4">
           <label className="block text-[#2d3a4e] font-semibold mb-1">Email</label>
           <div className="flex items-center border border-[#e0c98d] rounded-lg px-3 bg-[#f8f6f1]">
@@ -123,6 +128,7 @@ function Login() {
             />
           </div>
         </div>
+
         <div className="w-full mb-2">
           <label className="block text-[#2d3a4e] font-semibold mb-1">Password</label>
           <div className="flex items-center border border-[#e0c98d] rounded-lg px-3 bg-[#f8f6f1]">
@@ -139,8 +145,6 @@ function Login() {
           </div>
         </div>
         
-        {/* Forgot Password Link */}
-        {/* Remember me and Forgot Password row */}
         <div className="w-full flex justify-between items-center mb-6">
           <div className="flex items-center">
             <input
@@ -172,30 +176,25 @@ function Login() {
           Sign In
         </button>
 
-        {/* Or continue with section */}
         <div className="w-full flex items-center my-6">
           <div className="flex-1 border-t border-[#e0c98d]"></div>
           <span className="px-4 text-sm text-[#2d3a4e]">Or continue with</span>
           <div className="flex-1 border-t border-[#e0c98d]"></div>
         </div>
 
-        {/* Google Sign In Button */}
         <button
           onClick={async () => {
             try {
               const provider = new GoogleAuthProvider();
-              // Force account selection even when one account is available
               provider.setCustomParameters({
                 prompt: 'select_account'
               });
               const result = await signInWithPopup(auth, provider);
               const user = result.user;
               
-              // Check if user document exists
               const userDoc = await getDoc(doc(db, "users", user.uid));
               
               if (!userDoc.exists()) {
-                // If new user, create a document with default role as guest
                 await setDoc(doc(db, "users", user.uid), {
                   email: user.email,
                   role: "guest",
@@ -206,7 +205,6 @@ function Login() {
                 alert("Welcome to StayHub! You've been registered as a guest.");
                 navigate("/guest");
               } else {
-                // If existing user, get their role and redirect
                 const savedRole = userDoc.data().role;
                 alert(`Login successful as ${savedRole}`);
                 if (savedRole === "guest") navigate("/guest");
@@ -227,6 +225,7 @@ function Login() {
           </svg>
           Google
         </button>
+
         <p className="mt-7 text-sm text-[#2d3a4e]">
           Don't have an account?{" "}
           <span

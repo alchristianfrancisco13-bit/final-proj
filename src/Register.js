@@ -1,16 +1,15 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { auth, db } from "./firebase";
 import { createUserWithEmailAndPassword, fetchSignInMethodsForEmail, signOut } from "firebase/auth";
 import { doc, setDoc, getDoc, collection, query, where, getDocs } from "firebase/firestore";
 import { useNavigate, Link } from "react-router-dom";
 import OTPVerification from "./OTPVerification";
 import { FIRESTORE_COLLECTIONS } from "./config";
-import { useEffect } from "react";
-
 
 function Register() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [role, setRole] = useState("guest");
@@ -24,14 +23,17 @@ function Register() {
     document.title = "Register - StayHub";
   }, []);
 
-  // Validate form before proceeding to OTP verification
   const validateForm = () => {
-    if (!email || !password || !name || !phone) {
+    if (!email || !password || !confirmPassword || !name || !phone) {
       setError("Please fill in all fields");
       return false;
     }
     if (password.length < 6) {
       setError("Password must be at least 6 characters long");
+      return false;
+    }
+    if (password !== confirmPassword) {
+      setError("Passwords do not match");
       return false;
     }
     if (!email.includes("@")) {
@@ -53,13 +55,11 @@ function Register() {
     return true;
   };
 
-  // Start registration process - show OTP verification
   const startRegistration = async () => {
     setError("");
     if (validateForm()) {
-      setIsLoading(true); // Set loading state
+      setIsLoading(true);
       try {
-        // Check if email already exists in Firebase Auth
         const signInMethods = await fetchSignInMethodsForEmail(auth, email);
         if (signInMethods && signInMethods.length > 0) {
           setError("This email is already registered. Please use a different email or log in.");
@@ -67,7 +67,6 @@ function Register() {
           return;
         }
 
-        // Additional check in Firestore users collection
         const usersRef = collection(db, FIRESTORE_COLLECTIONS.USERS);
         const emailQuery = await getDocs(query(usersRef, where('email', '==', email)));
         
@@ -82,18 +81,16 @@ function Register() {
         console.error("Error checking email existence:", error);
         setError("Failed to check email existence. Please try again.");
       } finally {
-        setIsLoading(false); // Reset loading state
+        setIsLoading(false);
       }
     }
   };
 
-  // Complete registration after OTP verification
   const completeRegistration = async (userInfo) => {
     setIsLoading(true);
     setError("");
 
     try {
-      // Verify OTP was successfully verified
       const otpDoc = await getDoc(doc(db, FIRESTORE_COLLECTIONS.OTP_VERIFICATIONS, email));
       
       if (!otpDoc.exists()) {
@@ -109,11 +106,9 @@ function Register() {
         return;
       }
 
-      // Create Firebase Auth user
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       const newUser = userCredential.user;
 
-      // Save user data to Firestore
       await setDoc(doc(db, FIRESTORE_COLLECTIONS.USERS, newUser.uid), {
         email: newUser.email,
         name: userInfo.name.trim(),
@@ -124,20 +119,14 @@ function Register() {
         otpVerifiedAt: otpData.verifiedAt
       });
 
-      // Clean up OTP verification document
       await setDoc(doc(db, FIRESTORE_COLLECTIONS.OTP_VERIFICATIONS, email), {
         ...otpData,
         completed: true,
         completedAt: new Date()
       }, { merge: true });
 
-      // Sign out the user to ensure they need to log in manually
       await signOut(auth);
-
-      // Show success message
       alert("Registration successful! Please log in with your email and password to continue.");
-      
-      // Redirect to login page
       navigate("/");
       
     } catch (error) {
@@ -148,13 +137,11 @@ function Register() {
     }
   };
 
-  // Go back to registration form
   const goBackToRegistration = () => {
     setShowOTPVerification(false);
     setError("");
   };
 
-  // Show OTP verification if user has started the process
   if (showOTPVerification) {
     return (
       <OTPVerification
@@ -169,17 +156,23 @@ function Register() {
   }
 
   return (
-    <div
-      className="flex items-center justify-center min-h-screen bg-gradient-to-br from-[#f8f6f1] via-[#e9e7e1] to-[#d1cfc7]"
-      style={{
-        backgroundImage: "url('https://i.pinimg.com/1200x/c4/9d/ef/c49defa16fd398e0e27d19473c179886.jpg')",
-        backgroundSize: "cover",
-        backgroundPosition: "center",
-        backgroundRepeat: "no-repeat"
-      }}
-    >
-      <div className="bg-white/40 shadow-2xl p-10 rounded-3xl w-[410px] flex flex-col items-center border border-[#e0c98d]">
-        {/* StayHub Logo */}
+    <div className="relative flex items-center justify-center min-h-screen overflow-hidden">
+      {/* Background Video */}
+      <video
+        autoPlay
+        loop
+        muted
+        playsInline
+        className="absolute top-0 left-0 w-full h-full object-cover"
+      >
+        <source src="https://cdn.pixabay.com/video/2024/02/29/202392-918066367_large.mp4" type="video/mp4" />
+      </video>
+
+      {/* Overlay for better readability */}
+      <div className="absolute top-0 left-0 w-full h-full bg-black opacity-20"></div>
+
+      {/* Content */}
+      <div className="relative z-10 bg-white/40 backdrop-blur-sm shadow-2xl p-10 rounded-3xl w-[410px] flex flex-col items-center border border-[#e0c98d]">
         <div className="mb-6">
           <img src="logo_stay_hub1.png" alt="StayHub" className="h-20 w-auto" />
         </div>
@@ -191,6 +184,7 @@ function Register() {
             {error}
           </div>
         )}
+
         <div className="w-full mb-4">
           <label className="block text-[#2d3a4e] font-semibold mb-1">Email</label>
           <div className="flex items-center border border-[#e0c98d] rounded-lg px-3 bg-[#f8f6f1]">
@@ -205,6 +199,7 @@ function Register() {
             />
           </div>
         </div>
+
         <div className="w-full mb-4">
           <label className="block text-[#2d3a4e] font-semibold mb-1">Password</label>
           <div className="flex items-center border border-[#e0c98d] rounded-lg px-3 bg-[#f8f6f1]">
@@ -220,6 +215,23 @@ function Register() {
             />
           </div>
         </div>
+
+        <div className="w-full mb-4">
+          <label className="block text-[#2d3a4e] font-semibold mb-1">Confirm Password</label>
+          <div className="flex items-center border border-[#e0c98d] rounded-lg px-3 bg-[#f8f6f1]">
+            <svg className="w-5 h-5 text-[#bfa14a] mr-2" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 11c1.657 0 3-1.343 3-3s-1.343-3-3-3-3 1.343-3 3 1.343 3 3 3z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17 21v-2a4 4 0 00-8 0v2" />
+            </svg>
+            <input
+              type="password"
+              placeholder="Confirm your password"
+              className="bg-transparent outline-none py-2 w-full text-[#2d3a4e]"
+              onChange={(e) => setConfirmPassword(e.target.value)}
+            />
+          </div>
+        </div>
+
         <div className="w-full mb-4">
           <label className="block text-[#2d3a4e] font-semibold mb-1">Full Name</label>
           <div className="flex items-center border border-[#e0c98d] rounded-lg px-3 bg-[#f8f6f1]">
@@ -234,6 +246,7 @@ function Register() {
             />
           </div>
         </div>
+
         <div className="w-full mb-4">
           <label className="block text-[#2d3a4e] font-semibold mb-1">Phone Number</label>
           <div className="flex items-center border border-[#e0c98d] rounded-lg px-3 bg-[#f8f6f1]">
@@ -248,6 +261,7 @@ function Register() {
             />
           </div>
         </div>
+
         <div className="w-full mb-6">
           <label className="block text-[#2d3a4e] font-semibold mb-1">Select Role</label>
           <select
@@ -257,9 +271,9 @@ function Register() {
           >
             <option value="guest">Guest</option>
             <option value="host">Host</option>
-            
           </select>
         </div>
+
         <div className="w-full mb-4">
           <label className="flex items-start gap-2 text-[#2d3a4e] text-sm cursor-pointer select-none">
             <input
@@ -281,6 +295,7 @@ function Register() {
             </span>
           </label>
         </div>
+
         <button
           onClick={startRegistration}
           disabled={isLoading || !acceptedTerms}
@@ -288,6 +303,7 @@ function Register() {
         >
           {isLoading ? "Processing..." : "Send Verification Code"}
         </button>
+
         <p className="mt-7 text-sm text-[#2d3a4e]">
           Already have an account?{" "}
           <span
