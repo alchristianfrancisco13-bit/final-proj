@@ -18,8 +18,8 @@ export const FIRESTORE_COLLECTIONS = {
   OTP_VERIFICATIONS: "otp_verifications"
 };
 
-// PayPal configuration (replace with your client id)
+// PayPal configuration (Sandbox)
 export const PAYPAL_CONFIG = {
-  CLIENT_ID: "YOUR_PAYPAL_CLIENT_ID", // e.g. 'sb' for sandbox or live client id
-  CURRENCY: "PHP"
+  CLIENT_ID: "AX2UMlePiqsjclhBUK-_wsmwqERwuz7q95ishOYV5ndtBTQvpTRlIN8yAhLAZWv99GWvEjLbuzfZNKd4",
+  CURRENCY: "USD" // PayPal Sandbox uses USD
 };

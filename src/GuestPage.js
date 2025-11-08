@@ -2,9 +2,10 @@ import { useState, useEffect } from "react";
 import { 
   collection, addDoc, doc, updateDoc, getDocs, query, 
   where, onSnapshot, Timestamp, serverTimestamp, getDoc,
-  increment, arrayUnion, setDoc, deleteDoc 
+  increment, arrayUnion, setDoc, deleteDoc, orderBy, limit
 } from "firebase/firestore";
 import { db, auth } from "./firebase";
+import { incrementDashboardMetrics } from "./utils/dashboardMetrics";
 import { 
   FaHeart, FaSearch, FaWallet, FaListAlt, FaUserCircle, FaStar, FaShareAlt, FaTrash, 
   FaRegCalendarAlt, FaRegCommentDots, FaCamera, FaSignOutAlt, FaFilter, FaMapMarkerAlt, 
@@ -12,18 +13,49 @@ import {
   FaWhatsapp, FaTelegram, FaCopy, FaEye, FaEyeSlash, FaCog, FaBookmark, FaHistory,
   FaGift, FaThumbsUp, FaLocationArrow, FaWifi, FaCar, FaSwimmingPool, FaUtensils,
   FaTv, FaShower, FaBed, FaParking, FaLock, FaFire, FaSnowflake, FaUmbrella, FaCreditCard,
-  FaKey, FaSpinner
+  FaKey, FaSpinner, FaClock, FaExclamationTriangle, FaBars, FaTimes
 } from "react-icons/fa";
 import { updateEmail, sendEmailVerification, reauthenticateWithCredential, EmailAuthProvider } from "firebase/auth";
 import { updateListingMetrics } from "./utils/listingMetrics";
 import Messages from "./components/Messages";
 import ChatList from "./components/ChatList";
+import { PAYPAL_CONFIG } from "./config";
+
 
 
 function GuestPage({ onLogout }) {
 
   useEffect(() => {
     document.title = "Guest Dashboard - StayHub";
+  }, []);
+
+  // Load transaction history from Firestore
+  useEffect(() => {
+    const loadTransactions = async () => {
+      const userId = auth.currentUser?.uid;
+      if (userId) {
+        try {
+          const transactionsRef = collection(db, "transactions");
+          const q = query(
+            transactionsRef,
+            where("userId", "==", userId),
+            orderBy("createdAt", "desc"),
+            limit(50)
+          );
+          const querySnapshot = await getDocs(q);
+          const loadedTransactions = querySnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          }));
+          setTransactions(loadedTransactions);
+          console.log('Loaded transactions:', loadedTransactions.length);
+        } catch (error) {
+          console.error('Error loading transactions:', error);
+        }
+      }
+    };
+
+    loadTransactions();
   }, []);
 
   // Load user profile from Firestore
@@ -39,8 +71,16 @@ function GuestPage({ onLogout }) {
               ...prev,
               name: userData.name || "Guest User",
               phone: userData.phone || "Not provided",
-              email: userData.email || auth.currentUser?.email || "Loading..."
+              email: userData.email || auth.currentUser?.email || "Loading...",
+              avatar: userData.avatar || prev.avatar,
+              preferences: userData.preferences || prev.preferences
             }));
+            
+            // Load PayPal balance from Firestore
+            if (userData.paypalBalance !== undefined) {
+              setPaypalBalance(userData.paypalBalance);
+              console.log('Loaded PayPal balance:', userData.paypalBalance);
+            }
           } else {
             // Fallback to localStorage if Firestore data doesn't exist
             const saved = localStorage.getItem(`guestProfile_${userId}`);
@@ -156,7 +196,7 @@ function GuestPage({ onLogout }) {
     const q = query(
       bookingsRef, 
       where("guestId", "==", auth.currentUser.uid),
-      where("status", "in", ["Upcoming", "Completed"]) // Only get real bookings
+      where("status", "in", ["PendingApproval", "Upcoming", "Completed", "Declined", "CancelledByGuest"]) // Show pending and history
     );
 
     // Listen for real-time updates
@@ -217,19 +257,30 @@ function GuestPage({ onLogout }) {
           booking.displayBookingDate = 'Invalid Date';
         }
 
-        // Determine booking status
-        const checkInDate = new Date(booking.checkIn);
-        checkInDate.setHours(0, 0, 0, 0);
-        booking.status = checkInDate < currentDate ? "Completed" : "Upcoming";
+        // Preserve status from Firestore (PendingApproval, Declined, CancelledByGuest)
+        // Only auto-update to Completed if status is Upcoming and check-in has passed
+        if (booking.status === "Upcoming") {
+          const checkInDate = new Date(booking.checkIn);
+          checkInDate.setHours(0, 0, 0, 0);
+          if (checkInDate < currentDate) {
+            booking.status = "Completed";
+          }
+        }
+        // Keep original status for PendingApproval, Declined, CancelledByGuest
         return booking;
       });
 
-      // Sort by checkIn date, upcoming first
+      // Sort by status priority: PendingApproval > Upcoming > others, then by date
       bookingsData.sort((a, b) => {
-        if (a.status === b.status) {
-          return new Date(b.checkIn) - new Date(a.checkIn);
+        const statusPriority = { "PendingApproval": 1, "Upcoming": 2, "Completed": 3, "Declined": 4, "CancelledByGuest": 5 };
+        const aPriority = statusPriority[a.status] || 99;
+        const bPriority = statusPriority[b.status] || 99;
+        
+        if (aPriority !== bPriority) {
+          return aPriority - bPriority;
         }
-        return a.status === "Upcoming" ? -1 : 1;
+        // Same status, sort by checkIn date (newest first for pending, upcoming first for others)
+        return new Date(b.checkIn) - new Date(a.checkIn);
       });
       
       setBookings(bookingsData);
@@ -254,6 +305,9 @@ function GuestPage({ onLogout }) {
   });
   const [searchQuery, setSearchQuery] = useState("");
   const [search, setSearch] = useState("");
+  const [searchWhere, setSearchWhere] = useState("");
+  const [searchDates, setSearchDates] = useState({ checkIn: "", checkOut: "" });
+  const [searchGuests, setSearchGuests] = useState(1);
   const [firebaseListings, setFirebaseListings] = useState([]);
   const [bookings, setBookings] = useState([]);
   const [profile, setProfile] = useState({
@@ -276,8 +330,17 @@ function GuestPage({ onLogout }) {
   const [showShareModal, setShowShareModal] = useState(null);
   const [showBookingShareModal, setShowBookingShareModal] = useState(null);
   const [showAccountSettings, setShowAccountSettings] = useState(false);
-  const [eWalletBalance, setEWalletBalance] = useState(15000);
-  const [showEWallet, setShowEWallet] = useState(false);
+  const [paypalBalance, setPaypalBalance] = useState(100.00); // USD balance
+  const [showPayPalTopUp, setShowPayPalTopUp] = useState(false);
+  const [showPayPalTopUpPayment, setShowPayPalTopUpPayment] = useState(false);
+  const [showPayPalCashIn, setShowPayPalCashIn] = useState(false);
+  const [cashInAmount, setCashInAmount] = useState(0);
+  const [customAmount, setCustomAmount] = useState('');
+  const [topUpAmount, setTopUpAmount] = useState(0);
+  const [showCustomAlert, setShowCustomAlert] = useState(false);
+  const [customAlertData, setCustomAlertData] = useState({ type: 'success', title: '', message: '', details: [] });
+  const [showTransactionHistory, setShowTransactionHistory] = useState(false);
+  const [transactions, setTransactions] = useState([]);
   const [showBookingModal, setShowBookingModal] = useState(false);
   const [selectedListing, setSelectedListing] = useState(null);
   const [bookingDates, setBookingDates] = useState({ checkIn: '', checkOut: '' });
@@ -303,6 +366,9 @@ function GuestPage({ onLogout }) {
   const [emailChangeData, setEmailChangeData] = useState({ newEmail: "", password: "", verificationSent: false });
   const [emailChangeError, setEmailChangeError] = useState("");
   const [emailChangeLoading, setEmailChangeLoading] = useState(false);
+
+  // Sidebar state
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   // Open Edit Profile Modal
   const handleProfileEdit = () => {
@@ -335,10 +401,11 @@ function GuestPage({ onLogout }) {
     try {
       const userId = auth.currentUser?.uid;
       if (userId) {
-        // Update Firestore
+        // Update Firestore (including avatar)
         await updateDoc(doc(db, "users", userId), {
           name: editProfileData.name,
           phone: editProfileData.phone,
+          avatar: editProfileData.avatar,
           updatedAt: new Date()
         });
         
@@ -360,6 +427,20 @@ function GuestPage({ onLogout }) {
       setProfile(editProfileData);
       setShowEditProfile(false);
     }
+  };
+
+  // Helper function to safely render reviews/rating
+  const renderReviewsRating = (reviewsOrRating) => {
+    if (Array.isArray(reviewsOrRating)) {
+      return reviewsOrRating.length > 0 ? `${reviewsOrRating.length} reviews` : 'New';
+    }
+    if (typeof reviewsOrRating === 'number') {
+      return reviewsOrRating.toFixed ? reviewsOrRating.toFixed(1) : reviewsOrRating;
+    }
+    if (typeof reviewsOrRating === 'object' && reviewsOrRating !== null) {
+      return 'New';
+    }
+    return 'New';
   };
 
   // Star rating component
@@ -448,8 +529,29 @@ useEffect(() => {
 
   // Handle submitting the rating
   const handleSubmitRating = async () => {
-    if (!selectedBookingToRate || rating === 0) {
-      alert("Please select a rating before submitting");
+    // Validation checks
+    if (!selectedBookingToRate) {
+      alert("No booking selected");
+      return;
+    }
+
+    if (rating === 0) {
+      alert("Please select a rating (1-5 stars)");
+      return;
+    }
+
+    if (selectedBookingToRate.hasRated) {
+      alert("You have already rated this booking");
+      return;
+    }
+
+    if (selectedBookingToRate.status !== "Completed") {
+      alert("You can only rate completed stays");
+      return;
+    }
+
+    if (!selectedBookingToRate.listingId) {
+      alert("Error: Missing listing information");
       return;
     }
 
@@ -457,70 +559,66 @@ useEffect(() => {
       // Create a review object
       const reviewObj = {
         rating: rating,
-        review: review,
+        review: review.trim() || "No review provided",
         guestId: auth.currentUser.uid,
-        guestName: profile.name,
-        guestAvatar: profile.avatar,
-        date: serverTimestamp(),
-        bookingId: selectedBookingToRate.id
+        guestName: profile.name || "Guest",
+        guestAvatar: profile.avatar || "",
+        date: new Date().toISOString(),
+        bookingId: selectedBookingToRate.id,
+        propertyTitle: selectedBookingToRate.title,
+        checkInDate: selectedBookingToRate.checkIn,
+        checkOutDate: selectedBookingToRate.checkOut
       };
 
       // Get the listing document from Firestore
       const listingRef = doc(db, "hostListings", selectedBookingToRate.listingId);
       const listingDoc = await getDoc(listingRef);
 
-      if (listingDoc.exists()) {
-        const listingData = listingDoc.data();
-        const currentRating = listingData.rating || 0;
-        const currentNumReviews = listingData.numReviews || 0;
-        
-        // Calculate new average rating
-        const newNumReviews = currentNumReviews + 1;
-        const newRating = ((currentRating * currentNumReviews) + rating) / newNumReviews;
-        
-        // Update the listing document
-        await updateDoc(listingRef, {
-          rating: parseFloat(newRating.toFixed(1)),
-          numReviews: newNumReviews,
-          reviews: arrayUnion(reviewObj),
-          updatedAt: serverTimestamp()
-        });
-
-        // Update the booking document to mark as rated
-        const bookingRef = doc(db, "bookings", selectedBookingToRate.id);
-        await updateDoc(bookingRef, {
-          hasRated: true,
-          rating: rating,
-          review: review,
-          reviewDate: serverTimestamp(),
-          updatedAt: serverTimestamp()
-        });
-
-        // Update local bookings state
-        const updatedBookings = bookings.map(booking => {
-          if (booking.id === selectedBookingToRate.id) {
-            return {
-              ...booking,
-              hasRated: true,
-              rating: rating,
-              review: review
-            };
-          }
-          return booking;
-        });
-        setBookings(updatedBookings);
-
-        setShowRatingModal(false);
-        setSelectedBookingToRate(null);
-        setRating(0);
-        setReview("");
-        alert("Thank you for your rating!");
-      } else {
-        alert("Error: Could not find the listing to rate");
+      if (!listingDoc.exists()) {
+        throw new Error("Listing not found");
       }
+
+      const listingData = listingDoc.data();
+      const currentRating = listingData.rating || 0;
+      const currentNumReviews = listingData.numReviews || 0;
+      
+      // Calculate new average rating
+      const newNumReviews = currentNumReviews + 1;
+      const newRating = ((currentRating * currentNumReviews) + rating) / newNumReviews;
+      
+      // Update the listing document
+      await updateDoc(listingRef, {
+        rating: parseFloat(newRating.toFixed(1)),
+        numReviews: newNumReviews,
+        reviews: arrayUnion(reviewObj),
+        lastReviewDate: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+
+      console.log(`Updated listing ${selectedBookingToRate.listingId} with new rating: ${newRating.toFixed(1)}`);
+
+      // Update the booking document to mark as rated
+      const bookingRef = doc(db, "bookings", selectedBookingToRate.id);
+      await updateDoc(bookingRef, {
+        hasRated: true,
+        rating: rating,
+        review: review.trim(),
+        reviewDate: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+
+      console.log(`Marked booking ${selectedBookingToRate.id} as rated`);
+
+      // Close modal and reset
+      setShowRatingModal(false);
+      setSelectedBookingToRate(null);
+      setRating(0);
+      setReview("");
+      
+      alert("✅ Thank you for your rating! Your feedback helps other guests.");
     } catch (error) {
       console.error("Error submitting rating:", error);
-      alert("Sorry, there was an error submitting your rating. Please try again.");
+      alert(`Sorry, there was an error submitting your rating: ${error.message}. Please try again.`);
     }
   };
 
@@ -583,9 +681,141 @@ useEffect(() => {
     setShowWishlist(!showWishlist);
   };
 
-  // Simulate e-wallet payment
-  const handlePay = () => {
-    alert("Redirecting to e-wallet payment...");
+  // Custom Alert Helper
+  const showAlert = (type, title, message, details = []) => {
+    setCustomAlertData({ type, title, message, details });
+    setShowCustomAlert(true);
+  };
+
+  // Save transaction to Firestore
+  const saveTransaction = async (transactionData) => {
+    const userId = auth.currentUser?.uid;
+    if (userId) {
+      try {
+        const transactionsRef = collection(db, "transactions");
+        const newTransaction = {
+          ...transactionData,
+          userId: userId,
+          timestamp: serverTimestamp(),
+          createdAt: new Date().toISOString()
+        };
+        await addDoc(transactionsRef, newTransaction);
+        console.log('Transaction saved:', newTransaction);
+        
+        // Update local state
+        setTransactions(prev => [newTransaction, ...prev]);
+      } catch (error) {
+        console.error('Error saving transaction:', error);
+      }
+    }
+  };
+
+  // Save PayPal balance to Firestore
+  const savePayPalBalance = async (newBalance) => {
+    const userId = auth.currentUser?.uid;
+    if (userId) {
+      try {
+        await updateDoc(doc(db, "users", userId), {
+          paypalBalance: newBalance,
+          updatedAt: serverTimestamp()
+        });
+        console.log('PayPal balance saved to Firestore:', newBalance);
+      } catch (error) {
+        console.error('Error saving PayPal balance:', error);
+      }
+    }
+  };
+
+  // PayPal Cash-In handler - Show amount selection first
+  const handleSelectCashInAmount = (amount) => {
+    setCashInAmount(amount);
+    setShowPayPalTopUp(false);
+    setShowPayPalCashIn(true);
+  };
+
+  // Handle custom amount submission
+  const handleCustomAmountSubmit = () => {
+    const amount = parseFloat(customAmount);
+    if (isNaN(amount) || amount <= 0) {
+      showAlert('error', 'Invalid Amount', 'Please enter a valid amount greater than $0', [
+        'Amount must be a positive number',
+        'Minimum: $0.01 USD'
+      ]);
+      return;
+    }
+    if (amount > 10000) {
+      showAlert('error', 'Amount Too Large', 'Maximum amount is $10,000 USD', [
+        `You entered: $${amount.toLocaleString()} USD`,
+        'Please enter a smaller amount'
+      ]);
+      return;
+    }
+    handleSelectCashInAmount(amount);
+    setCustomAmount('');
+  };
+
+  // Process cash-in after successful PayPal payment
+  const processCashInAfterPayment = async (transactionId) => {
+    try {
+      const newBalance = paypalBalance + cashInAmount;
+      setPaypalBalance(newBalance);
+      await savePayPalBalance(newBalance);
+      
+      console.log(`✅ Cash-in successful: $${cashInAmount} USD. Transaction: ${transactionId}`);
+      
+      // Save transaction to history
+      await saveTransaction({
+        type: 'Cash-In',
+        amount: cashInAmount,
+        currency: 'USD',
+        transactionId: transactionId,
+        balanceBefore: paypalBalance,
+        balanceAfter: newBalance,
+        status: 'Completed',
+        description: 'PayPal Cash-In'
+      });
+      
+      setShowPayPalCashIn(false);
+      setCashInAmount(0);
+      
+      // Show custom success alert
+      showAlert('success', 'Cash-in successful!', '', [
+        `Amount: $${cashInAmount.toFixed(2)} USD`,
+        `New Balance: $${newBalance.toFixed(2)} USD`,
+        `Transaction ID: ${transactionId}`
+      ]);
+    } catch (error) {
+      console.error('Error processing cash-in:', error);
+      showAlert('error', 'Cash-in Failed', 'There was an error adding funds.', [
+        `Transaction ID: ${transactionId}`,
+        'Please contact support for assistance.'
+      ]);
+    }
+  };
+
+  // PayPal Top-up handler - Show PayPal payment modal
+  const handlePayPalTopUp = (amount) => {
+    setTopUpAmount(amount);
+    setShowPayPalTopUp(false);
+    setShowPayPalTopUpPayment(true);
+  };
+
+  // Process top-up after successful PayPal payment
+  const processTopUpAfterPayment = async (transactionId) => {
+    try {
+      const newBalance = paypalBalance + topUpAmount;
+      setPaypalBalance(newBalance);
+      await savePayPalBalance(newBalance);
+      
+      console.log(`✅ Top-up successful: $${topUpAmount} USD. Transaction: ${transactionId}`);
+      alert(`✅ Top-up successful!\nAmount: $${topUpAmount} USD\nNew Balance: $${newBalance.toFixed(2)} USD\nTransaction ID: ${transactionId}`);
+      
+      setShowPayPalTopUpPayment(false);
+      setTopUpAmount(0);
+    } catch (error) {
+      console.error('Error processing top-up:', error);
+      alert('There was an error adding funds. Please contact support with transaction ID: ' + transactionId);
+    }
   };
 
   // Suggestions & Recommendations (based on previous bookings)
@@ -598,294 +828,7 @@ useEffect(() => {
 
   // Enhanced listings with more details for Airbnb-style experience
   const listings = [
-    // { 
-    //   id: "L-001", 
-    //   title: "Cozy Home in Tagaytay", 
-    //   category: "Home", 
-    //   img: "/images/cozy home.jpg", 
-    //   location: "Tagaytay", 
-    //   amenities: ["Wifi", "Parking", "Kitchen", "AC", "TV", "Shower"], 
-    //   reviews: 4.8, 
-    //   calendar: "Available", 
-    //   pricePerNight: 2990,
-    //   host: "Maria Santos",
-    //   description: "Beautiful cozy home with stunning views of Taal Lake. Perfect for families and couples.",
-    //   photos: [
-    //     "/images/cozy home.jpg",
-    //     "/images/cozy home.jpg",
-    //     "/images/cozy home.jpg"
-    //   ],
-    //   coordinates: { lat: 14.1000, lng: 120.9333 }
-    // },
-    // { 
-    //   id: "L-002", 
-    //   title: "Beachfront Experience", 
-    //   category: "Experience", 
-    //   img: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop", 
-    //   location: "Batangas", 
-    //   amenities: ["Pool", "Breakfast", "Beach Access", "Parking", "Wifi", "Restaurant"], 
-    //   reviews: 4.5, 
-    //   calendar: "Available", 
-    //   pricePerNight: 4590,
-    //   host: "Juan Dela Cruz",
-    //   description: "Luxurious beachfront resort with private beach access and infinity pool.",
-    //   photos: [
-    //     "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop",
-    //     "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop",
-    //     "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop"
-    //   ],
-    //   coordinates: { lat: 13.7563, lng: 121.0583 }
-    // },
-    // { 
-    //   id: "L-003", 
-    //   title: "City Service Apartment", 
-    //   category: "Service", 
-    //   img: "https://images.unsplash.com/photo-1505691938895-1758d7feb511?q=80&w=1200&auto=format&fit=crop", 
-    //   location: "Makati", 
-    //   amenities: ["AC", "Kitchen", "Wifi", "Parking", "Gym", "Concierge"], 
-    //   reviews: 4.2, 
-    //   calendar: "Few slots", 
-    //   pricePerNight: 3490,
-    //   host: "Anna Rodriguez",
-    //   description: "Modern serviced apartment in the heart of Makati business district.",
-    //   photos: [
-    //     "https://images.unsplash.com/photo-1505691938895-1758d7feb511?q=80&w=1200&auto=format&fit=crop",
-    //     "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop",
-    //     "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop"
-    //   ],
-    //   coordinates: { lat: 14.5547, lng: 121.0244 }
-    // },
-    // { 
-    //   id: "L-004", 
-    //   title: "Mountain Cabin Retreat", 
-    //   category: "Home", 
-    //   img: "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg", 
-    //   location: "Baguio", 
-    //   amenities: ["Fireplace", "Wifi", "Kitchen", "Parking", "Mountain View", "Hot Tub"], 
-    //   reviews: 4.9, 
-    //   calendar: "Available", 
-    //   pricePerNight: 3990,
-    //   host: "Carlos Mountain",
-    //   description: "Cozy mountain cabin with fireplace and stunning mountain views.",
-    //   photos: [
-    //     "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg",
-    //     "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg",
-    //     "https://i.pinimg.com/1200x/3e/33/52/3e33528c3a3b29eda603176716c2de01.jpg"
-    //   ],
-    //   coordinates: { lat: 16.4023, lng: 120.5960 }
-    // },
-    // { 
-    //   id: "L-005", 
-    //   title: "Luxury Villa Experience", 
-    //   category: "Experience", 
-    //   img: "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop", 
-    //   location: "Boracay", 
-    //   amenities: ["Private Pool", "Beach Access", "Butler Service", "Spa", "Restaurant", "Wifi"], 
-    //   reviews: 4.7, 
-    //   calendar: "Available", 
-    //   pricePerNight: 8990,
-    //   host: "Island Resorts",
-    //   description: "Exclusive luxury villa with private pool and butler service.",
-    //   photos: [
-    //     "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop",
-    //     "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop",
-    //     "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop"
-    //   ],
-    //   coordinates: { lat: 11.9674, lng: 121.9248 }
-    // },
-    // Beach Properties
-    // { 
-    //   id: "L-006", 
-    //   title: "Oceanfront Beach House", 
-    //   category: "Beach", 
-    //   img: "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg", 
-    //   location: "La Union", 
-    //   amenities: ["Beach Access", "Ocean View", "Surfboard", "Wifi", "Kitchen", "Parking"], 
-    //   reviews: 4.9, 
-    //   calendar: "Available", 
-    //   pricePerNight: 3990,
-    //   host: "Surf Paradise",
-    //   description: "Stunning beachfront house with direct ocean access and surf lessons included.",
-    //   photos: [
-    //     "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg",
-    //     "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg",
-    //     "https://i.pinimg.com/736x/ca/87/83/ca87837c7fb51bdccf04a3327b8a98a1.jpg"
-    //   ],
-    //   coordinates: { lat: 16.4023, lng: 120.5960 }
-    // },
-    // { 
-    //   id: "L-007", 
-    //   title: "Tropical Beach Resort", 
-    //   category: "Beach", 
-    //   img: "https://images.unsplash.com/photo-1573843981267-be1999ff37cd?q=80&w=1200&auto=format&fit=crop", 
-    //   location: "Palawan", 
-    //   amenities: ["Private Beach", "Snorkeling", "Kayak", "Restaurant", "Spa", "Wifi"], 
-    //   reviews: 4.8, 
-    //   calendar: "Few slots", 
-    //   pricePerNight: 5990,
-    //   host: "Tropical Paradise",
-    //   description: "Luxurious beach resort with private beach and water activities included.",
-    //   photos: [
-    //     "https://images.unsplash.com/photo-1573843981267-be1999ff37cd?q=80&w=1200&auto=format&fit=crop",
-    //     "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=1200&auto=format&fit=crop",
-    //     "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop"
-    //   ],
-    //   coordinates: { lat: 9.8349, lng: 118.7384 }
-    // },
-    // { 
-    //   id: "L-008", 
-    //   title: "Seaside Cottage", 
-    //   category: "Beach", 
-    //   img: "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg", 
-    //   location: "Siargao", 
-    //   amenities: ["Beachfront", "Fishing", "Boat", "Wifi", "Kitchen", "AC"], 
-    //   reviews: 4.6, 
-    //   calendar: "Available", 
-    //   pricePerNight: 3490,
-    //   host: "Island Life",
-    //   description: "Cozy seaside cottage perfect for fishing and island hopping adventures.",
-    //   photos: [
-    //     "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg",
-    //     "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg",
-    //     "https://i.pinimg.com/1200x/8a/b9/a3/8ab9a3c7f732ecff6d44db67c94861c2.jpg"
-    //   ],
-    //   coordinates: { lat: 9.9133, lng: 126.0519 }
-    // },
-    // Countryside Properties
-    // { 
-    //   id: "L-009", 
-    //   title: "Farmhouse Retreat", 
-    //   category: "Countryside", 
-    //   img: "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg", 
-    //   location: "Baguio", 
-    //   amenities: ["Farm Tour", "Fresh Produce", "Hiking", "Fireplace", "Wifi", "Parking"], 
-    //   reviews: 4.8, 
-    //   calendar: "Available", 
-    //   pricePerNight: 2490,
-    //   host: "Mountain Farm",
-    //   description: "Authentic farmhouse experience with fresh organic produce and farm activities.",
-    //   photos: [
-    //     "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg",
-    //     "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg",
-    //     "https://i.pinimg.com/1200x/07/2f/a6/072fa605a9deed3f4610ae555337c272.jpg"
-    //   ],
-    //   coordinates: { lat: 16.4023, lng: 120.5960 }
-    // },
-    // { 
-    //   id: "L-010", 
-    //   title: "Vineyard Villa", 
-    //   category: "Countryside", 
-    //   img: "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg", 
-    //   location: "Tagaytay", 
-    //   amenities: ["Wine Tasting", "Vineyard Tour", "Garden", "Wifi", "Kitchen", "Parking"], 
-    //   reviews: 4.7, 
-    //   calendar: "Available", 
-    //   pricePerNight: 4590,
-    //   host: "Vineyard Estate",
-    //   description: "Elegant villa in a working vineyard with wine tasting and vineyard tours.",
-    //   photos: [
-    //     "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg",
-    //     "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg",
-    //     "https://i.pinimg.com/1200x/f4/03/88/f4038843a473a2a1adb32d7d644654a8.jpg"
-    //   ],
-    //   coordinates: { lat: 14.1000, lng: 120.9333 }
-    // },
-    // { 
-    //   id: "L-011", 
-    //   title: "Rural Cabin", 
-    //   category: "Countryside", 
-    //   img: "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg", 
-    //   location: "Sagada", 
-    //   amenities: ["Nature Hiking", "Cave Tour", "Bonfire", "Wifi", "Kitchen", "Hot Tub"], 
-    //   reviews: 4.9, 
-    //   calendar: "Few slots", 
-    //   pricePerNight: 1990,
-    //   host: "Mountain Guide",
-    //   description: "Rustic cabin in the mountains with hiking trails and cave exploration.",
-    //   photos: [
-    //     "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg",
-    //     "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg",
-    //     "https://i.pinimg.com/736x/2b/2b/70/2b2b70447b921a04ecc9653d47fef00a.jpg"
-    //   ],
-    //   coordinates: { lat: 17.0833, lng: 120.9000 }
-    // },
-    // City Properties
-    // { 
-    //   id: "L-012", 
-    //   title: "Modern City Loft", 
-    //   category: "City", 
-    //   img: "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg", 
-    //   location: "Makati", 
-    //   amenities: ["City View", "Gym", "Concierge", "Wifi", "AC", "Parking"], 
-    //   reviews: 4.5, 
-    //   calendar: "Available", 
-    //   pricePerNight: 2990,
-    //   host: "Urban Living",
-    //   description: "Stylish loft in the heart of Makati with stunning city views and modern amenities.",
-    //   photos: [
-    //     "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg",
-    //     "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg",
-    //     "https://i.pinimg.com/1200x/35/9b/a2/359ba239412baf9e0132ee49bb4c2ff7.jpg"
-    //   ],
-    //   coordinates: { lat: 14.5547, lng: 121.0244 }
-    // },
-    // { 
-    //   id: "L-013", 
-    //   title: "Business District Suite", 
-    //   category: "City", 
-    //   img: "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop", 
-    //   location: "BGC", 
-    //   amenities: ["Business Center", "Meeting Room", "Wifi", "AC", "Restaurant", "Parking"], 
-    //   reviews: 4.6, 
-    //   calendar: "Available", 
-    //   pricePerNight: 3990,
-    //   host: "Business Suites",
-    //   description: "Professional suite in BGC perfect for business travelers with meeting facilities.",
-    //   photos: [
-    //     "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?q=80&w=1200&auto=format&fit=crop",
-    //     "https://images.unsplash.com/photo-1505691938895-1758d7feb511?q=80&w=1200&auto=format&fit=crop",
-    //     "https://images.unsplash.com/photo-1571896349842-33c89424de2d?q=80&w=1200&auto=format&fit=crop"
-    //   ],
-    //   coordinates: { lat: 14.5547, lng: 121.0244 }
-    // },
-    // { 
-    //   id: "L-014", 
-    //   title: "Historic City Apartment", 
-    //   category: "City", 
-    //   img: "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg", 
-    //   location: "Intramuros", 
-    //   amenities: ["Historic Area", "Museum Access", "Wifi", "AC", "Kitchen", "Parking"], 
-    //   reviews: 4.4, 
-    //   calendar: "Available", 
-    //   pricePerNight: 2490,
-    //   host: "Historic Manila",
-    //   description: "Charming apartment in historic Intramuros with easy access to museums and landmarks.",
-    //   photos: [
-    //     "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg",
-    //     "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg",
-    //     "https://i.pinimg.com/1200x/fd/e6/b8/fde6b837c576c2a2d4dc890eb706d854.jpg"
-    //   ],
-    //   coordinates: { lat: 14.5906, lng: 120.9750 }
-    // },
-    // { 
-    //   id: "L-015", 
-    //   title: "Luxury Penthouse", 
-    //   category: "City", 
-    //   img: "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg", 
-    //   location: "Ortigas", 
-    //   amenities: ["Skyline View", "Rooftop", "Butler", "Wifi", "AC", "Valet"], 
-    //   reviews: 4.9, 
-    //   calendar: "Few slots", 
-    //   pricePerNight: 7990,
-    //   host: "Luxury Living",
-    //   description: "Exclusive penthouse with panoramic city views and premium services.",
-    //   photos: [
-    //     "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg",
-    //     "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg",
-    //     "https://i.pinimg.com/736x/9f/b4/d0/9fb4d0066f0feb655d18fdac51782843.jpg"
-    //   ],
-    //   coordinates: { lat: 14.5844, lng: 121.0563 }
-    // }
+    
   ];
 
   // Available amenities for filtering
@@ -907,11 +850,19 @@ useEffect(() => {
   // Advanced search with filters
   const handleAdvancedSearch = () => {
     const pool = getListingsPool();
+    const searchTerm = searchWhere.trim() || search.trim();
+    
     let results = pool.filter(listing => {
-      const matchesSearch = !search.trim() || 
-        listing.title?.toLowerCase().includes(search.toLowerCase()) ||
-        listing.location?.toLowerCase().includes(search.toLowerCase()) ||
-        listing.category?.toLowerCase().includes(search.toLowerCase());
+      // Search by location/title/category
+      const matchesSearch = !searchTerm || 
+        listing.title?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        listing.location?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        listing.category?.toLowerCase().includes(searchTerm.toLowerCase());
+      
+      // If no results found for location, show message
+      if (searchTerm && !matchesSearch) {
+        return false;
+      }
       
       const matchesCategory = activeCategory === "All" || listing.category === activeCategory;
       
@@ -920,10 +871,26 @@ useEffect(() => {
       const matchesAmenities = selectedAmenities.length === 0 || 
         selectedAmenities.every(amenity => listing.amenities.includes(amenity));
       
-      return matchesSearch && matchesCategory && matchesPrice && matchesAmenities;
+      // Check date availability if dates are selected
+      let matchesDates = true;
+      if (searchDates.checkIn && searchDates.checkOut) {
+        matchesDates = checkDateAvailability(
+          listing.id,
+          searchDates.checkIn,
+          searchDates.checkOut
+        );
+      }
+      
+      return matchesSearch && matchesCategory && matchesPrice && matchesAmenities && matchesDates;
     });
     
     setSearchResults(results);
+    setSearchQuery(searchTerm);
+    
+    // Show message if no results
+    if (results.length === 0 && searchTerm) {
+      console.log('No listings found for:', searchTerm);
+    }
   };
 
 
@@ -1043,15 +1010,85 @@ useEffect(() => {
     }
   };
 
-  // Enhanced e-wallet functionality
-  const handleEWalletPayment = (amount) => {
-    
-    if (eWalletBalance >= amount) {
-      setEWalletBalance(prev => prev - amount);
-      alert(`Payment successful! Remaining balance: ₱${(eWalletBalance - amount).toLocaleString()}`);
+  // Check PayPal balance before payment
+  const checkPayPalBalance = (usdAmount) => {
+    if (paypalBalance >= usdAmount) {
+      return true;
     } else {
-      alert("Insufficient balance! Please top up your e-wallet.");
+      alert(`Insufficient PayPal balance!\nRequired: $${usdAmount} USD\nCurrent Balance: $${paypalBalance.toFixed(2)} USD\n\nPlease top up your account.`);
+      setShowPayPalTopUp(true);
+      return false;
     }
+  };
+
+  // Check if dates are available for a listing
+  const checkDateAvailability = (listingId, checkInDate, checkOutDate) => {
+    const checkIn = new Date(checkInDate);
+    const checkOut = new Date(checkOutDate);
+    
+    // Get all bookings for this listing that are active (Upcoming or PendingApproval)
+    const listingBookings = bookings.filter(
+      b => (b.listingId === listingId || b.id?.includes(listingId)) && 
+           (b.status === "Upcoming" || b.status === "PendingApproval")
+    );
+    
+    // Check if requested dates overlap with any existing booking
+    for (const booking of listingBookings) {
+      const bookedCheckIn = new Date(booking.checkIn);
+      const bookedCheckOut = new Date(booking.checkOut);
+      
+      // Check for date overlap
+      if (
+        (checkIn >= bookedCheckIn && checkIn < bookedCheckOut) ||
+        (checkOut > bookedCheckIn && checkOut <= bookedCheckOut) ||
+        (checkIn <= bookedCheckIn && checkOut >= bookedCheckOut)
+      ) {
+        return false; // Dates are not available
+      }
+    }
+    
+    return true; // Dates are available
+  };
+
+  // Get booked dates for a listing to disable in calendar
+  const getBookedDatesForListing = (listingId) => {
+    const listingBookings = bookings.filter(
+      b => (b.listingId === listingId || b.id?.includes(listingId)) && 
+           (b.status === "Upcoming" || b.status === "PendingApproval")
+    );
+    
+    const bookedDates = [];
+    listingBookings.forEach(booking => {
+      const checkIn = new Date(booking.checkIn);
+      const checkOut = new Date(booking.checkOut);
+      
+      for (let d = new Date(checkIn); d < checkOut; d.setDate(d.getDate() + 1)) {
+        bookedDates.push(d.toISOString().split('T')[0]);
+      }
+    });
+    
+    return bookedDates;
+  };
+
+  // Check if a specific date is booked
+  const isDateBooked = (listingId, date) => {
+    const bookedDates = getBookedDatesForListing(listingId);
+    return bookedDates.includes(date);
+  };
+
+  // Get booked date ranges for display
+  const getBookedRanges = (listingId) => {
+    const listingBookings = bookings.filter(
+      b => (b.listingId === listingId || b.id?.includes(listingId)) && 
+           (b.status === "Upcoming" || b.status === "PendingApproval")
+    );
+    
+    return listingBookings.map(booking => ({
+      checkIn: booking.checkIn,
+      checkOut: booking.checkOut,
+      displayCheckIn: booking.displayCheckIn,
+      displayCheckOut: booking.displayCheckOut
+    }));
   };
 
   // Booking functionality
@@ -1131,13 +1168,25 @@ useEffect(() => {
         alert("Maximum stay duration is 30 days.");
         return;
       }
+      
+      // Check if dates are available (prevent double booking)
+      const isAvailable = checkDateAvailability(
+        selectedListing.id,
+        bookingDates.checkIn,
+        bookingDates.checkOut
+      );
+      
+      if (!isAvailable) {
+        alert("Sorry, these dates are not available. Please select different dates.");
+        return;
+      }
     } catch (error) {
       console.error("Date validation error:", error);
       alert("Invalid dates selected. Please try again.");
       return;
     }
 
-    // Validate user and payment
+    // Validate user
     if (!auth.currentUser) {
       alert("You must be logged in to make a booking.");
       return;
@@ -1149,136 +1198,98 @@ useEffect(() => {
       return;
     }
 
-    if (eWalletBalance < total) {
-      alert("Insufficient e-wallet balance. Please top up your account.");
-      return;
-    }
-
-      try {
-        console.log("Creating booking with listing:", selectedListing);
-
-        // Add to bookings collection in Firestore first
-        const bookingsRef = collection(db, "bookings");
-        
-        // Parse and validate dates
-        const checkInDate = new Date(bookingDates.checkIn);
-        const checkOutDate = new Date(bookingDates.checkOut);
-        
-        if (isNaN(checkInDate.getTime()) || isNaN(checkOutDate.getTime())) {
-          throw new Error("Invalid dates selected");
-        }
-        
-        const now = new Date();
-        const bookingData = {
-          listingId: selectedListing.id,
-          title: selectedListing.title,
-          checkIn: checkInDate.toISOString().split('T')[0],
-          checkOut: checkOutDate.toISOString().split('T')[0],
-          status: "Upcoming",
-          img: selectedListing.img || "",
-          location: selectedListing.location,
-          amenities: selectedListing.amenities || [],
-          reviews: selectedListing.reviews || 0,
-          price: selectedListing.pricePerNight || selectedListing.price || 0,
-          host: selectedListing.host || "",
-          guests: bookingGuests,
-          notes: bookingNotes || "",
-          total: total,
-          paymentMethod: 'E-wallet',
-          paymentStatus: 'completed',
-          hasRated: false,
-          guestId: auth.currentUser.uid,
-          guestName: profile.name, // Add guest name from profile
-          guestEmail: auth.currentUser.email, // Add guest email
-          hostId: selectedListing.hostId || "",
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-          bookingDate: serverTimestamp(), // Use Firestore timestamp for consistency
-        };      console.log("Booking data prepared:", bookingData);
-
-      // Add the booking to Firestore
-      const newBookingRef = await addDoc(bookingsRef, bookingData);
-      console.log("Booking added to Firestore with ID:", newBookingRef.id);
-
-      // Update the booking with its ID
-      await updateDoc(newBookingRef, {
-        id: newBookingRef.id
-      });
-
-      // Add to local state with converted timestamps
-      // const localBooking = {
-      //   ...bookingData,
-      //   id: newBookingRef.id,
-      //   createdAt: new Date(),
-      //   updatedAt: new Date()
-      // };
-      // setBookings(prev => [localBooking, ...prev]);
-      
-      // Process payment
-      setEWalletBalance(prev => prev - total);
-
-      console.log("Updating listing metrics...");
-
-      // Try to update the listing in Firestore
-      try {
-        // First check hostListings collection
-        const hostListingRef = doc(db, "hostListings", selectedListing.id);
-        const hostListingDoc = await getDoc(hostListingRef);
-
-        if (hostListingDoc.exists()) {
-          console.log("Updating host listing...");
-          await updateDoc(hostListingRef, {
-            bookingsCount: increment(1),
-            lastBooked: serverTimestamp(),
-            calendar: "Few slots"
-          });
-        } else {
-          console.log("Updating regular listing...");
-          // Try regular listings collection
-          const regularListingRef = doc(db, "listings", selectedListing.id);
-          await updateDoc(regularListingRef, {
-            bookingsCount: increment(1),
-            lastBooked: serverTimestamp(),
-            calendar: "Few slots"
-          });
-        }
-
-        // Update listing metrics
-        await updateListingMetrics(selectedListing.id, {
-          bookings: 1,
-          revenue: total
-        });
-
-      } catch (listingError) {
-        console.error("Error updating listing:", listingError);
-        // Continue since booking is already saved
-      }
-
-      // Success! Show confirmation and reset
-      console.log("Booking completed successfully!");
-      setShowBookingModal(false);
-      setShowBookingConfirmation(true);
-      setBookingDates({ checkIn: '', checkOut: '' });
-      setBookingGuests(2);
-      setBookingNotes('');
-      setSelectedListing(null);
-
-    } catch (error) {
-      console.error("Error processing booking:", error);
-      alert("There was an error processing your booking. Please try again later.");
-    }
+    // Show PayPal payment modal instead of directly booking
+    console.log("Redirecting to PayPal payment...");
+    setShowBookingModal(false);
+    setPaymentAmount(total);
+    setShowPayPalPayment(true);
   };
 
   const handleCloseBookingConfirmation = () => {
     setShowBookingConfirmation(false);
   };
 
+  // Allow guest to cancel a pending booking within 24 hours with 50% refund
+  const handleCancelPendingBooking = async (booking) => {
+    try {
+      if (booking.status !== 'PendingApproval') {
+        showAlert('error', 'Cannot Cancel', 'Only pending bookings can be cancelled.', [
+          'This booking cannot be cancelled',
+          'Contact support for assistance'
+        ]);
+        return;
+      }
+      
+      const now = Date.now();
+      const deadlineMs = new Date(booking.cancelDeadline || 0).getTime();
+      if (!deadlineMs || now > deadlineMs) {
+        showAlert('error', 'Cancellation Expired', 'The 24-hour cancellation window has passed.', [
+          'Cancellations are only allowed within 24 hours of booking',
+          'Contact support for special requests'
+        ]);
+        return;
+      }
+
+      // Calculate 50% refund
+      const totalPaid = booking.total || 0;
+      const refundAmount = totalPaid * 0.5; // 50% refund
+      const refundUSD = parseFloat((refundAmount / 56).toFixed(2)); // Convert PHP to USD
+      
+      // Update PayPal balance
+      const newBalance = paypalBalance + refundUSD;
+      setPaypalBalance(newBalance);
+      await savePayPalBalance(newBalance);
+
+      // Save refund transaction
+      await saveTransaction({
+        type: 'Refund',
+        amount: refundUSD,
+        currency: 'USD',
+        phpAmount: refundAmount,
+        transactionId: `REFUND-${booking.id}`,
+        balanceBefore: paypalBalance,
+        balanceAfter: newBalance,
+        status: 'Completed',
+        description: `50% Refund for cancelled booking: ${booking.title || 'Booking'}`,
+        listingTitle: booking.title || '',
+        checkIn: booking.checkIn,
+        checkOut: booking.checkOut,
+        originalBookingId: booking.id
+      });
+
+      // Update booking status
+      await updateDoc(doc(db, 'bookings', booking.id), {
+        status: 'CancelledByGuest',
+        cancelledAt: serverTimestamp(),
+        refundAmount: refundAmount,
+        refundUSD: refundUSD,
+        refundPercentage: 50,
+        updatedAt: serverTimestamp()
+      });
+
+      // Show success alert
+      showAlert('success', 'Booking Cancelled', '50% refund has been processed', [
+        `Refund Amount: $${refundUSD.toFixed(2)} USD (₱${refundAmount.toLocaleString()} PHP)`,
+        `New Balance: $${newBalance.toFixed(2)} USD`,
+        'The refund has been added to your PayPal balance'
+      ]);
+      
+    } catch (e) {
+      console.error('Cancel booking failed:', e);
+      showAlert('error', 'Cancellation Failed', 'Failed to cancel booking.', [
+        'Please try again',
+        'If the problem persists, contact support'
+      ]);
+    }
+  };
+
   // Messaging functions
   const handleMessageHost = (listing) => {
     setSelectedHost({
       uid: listing.hostId || 'host_' + listing.id,
-      displayName: listing.host || 'Host',
-      email: 'host@stayhub.com'
+      displayName: listing.host || listing.hostEmail?.split('@')[0] || 'Host',
+      name: listing.host || 'Host',
+      email: listing.hostEmail || 'host@stayhub.com'
     });
     setSelectedProperty({
       id: listing.id,
@@ -1291,7 +1302,11 @@ useEffect(() => {
 
   // Handle chat selection from chat list
   const handleSelectChat = (otherUser, propertyInfo = null) => {
-    setSelectedHost(otherUser);
+    // Ensure displayName is set for Messages component compatibility
+    setSelectedHost({
+      ...otherUser,
+      displayName: otherUser.displayName || otherUser.name || otherUser.email?.split('@')[0] || 'User'
+    });
     setSelectedProperty(propertyInfo);
     setShowChatList(false);
     setShowMessages(true);
@@ -1320,37 +1335,86 @@ useEffect(() => {
         
         // Small delay to ensure DOM is ready
         setTimeout(() => {
+          // Convert PHP to USD (approximate rate: 1 USD = 56 PHP)
+          const usdAmount = parseFloat((paymentAmount / 56).toFixed(2));
+          
+          // Check balance before showing buttons
+          if (!checkPayPalBalance(usdAmount)) {
+            setShowPayPalPayment(false);
+            return;
+          }
+          
           window.paypal.Buttons({
             createOrder: (data, actions) => {
-              console.log('Creating PayPal order...');
+              console.log('Creating PayPal order for USD $' + usdAmount);
+              // Double-check balance
+              if (!checkPayPalBalance(usdAmount)) {
+                return Promise.reject(new Error('Insufficient balance'));
+              }
+              
               return actions.order.create({
                 purchase_units: [{
                   amount: {
-                    value: paymentAmount.toString(),
-                    currency_code: 'PHP'
-                  }
+                    value: usdAmount.toString(),
+                    currency_code: 'USD'
+                  },
+                  description: selectedListing ? `${selectedListing.title} - ${bookingDates.checkIn} to ${bookingDates.checkOut}` : 'StayHub Booking Payment'
                 }]
               });
             },
             onApprove: (data, actions) => {
               console.log('PayPal approval received...');
-              return actions.order.capture().then((details) => {
+              return actions.order.capture().then(async (details) => {
                 console.log('Payment captured:', details);
-                alert(`Payment completed! Transaction ID: ${details.id}`);
+                
+                // Deduct from PayPal balance
+                const newBalance = paypalBalance - usdAmount;
+                setPaypalBalance(newBalance);
+                await savePayPalBalance(newBalance);
+                
+                // Save transaction to history
+                await saveTransaction({
+                  type: 'Booking Payment',
+                  amount: -usdAmount,
+                  currency: 'USD',
+                  phpAmount: paymentAmount,
+                  transactionId: details.id,
+                  balanceBefore: paypalBalance,
+                  balanceAfter: newBalance,
+                  status: 'Completed',
+                  description: selectedListing ? `Payment for ${selectedListing.title}` : 'Booking Payment',
+                  listingTitle: selectedListing?.title || '',
+                  checkIn: bookingDates.checkIn,
+                  checkOut: bookingDates.checkOut
+                });
+                
                 setShowPayPalPayment(false);
                 // Process booking after successful payment
                 processBookingAfterPayment(details.id);
+                
+                // Show custom success alert
+                showAlert('success', 'Payment successful!', '', [
+                  `Transaction ID: ${details.id}`,
+                  `Amount: $${usdAmount} USD (₱${paymentAmount.toLocaleString()} PHP)`,
+                  `New Balance: $${newBalance.toFixed(2)} USD`
+                ]);
               });
             },
             onError: (err) => {
               console.error('PayPal error:', err);
-              alert('Payment failed. Please try again.');
               setShowPayPalPayment(false);
+              showAlert('error', 'Payment Failed', 'There was an error processing your payment.', [
+                'Please try again',
+                'If the problem persists, contact support'
+              ]);
             },
             onCancel: () => {
               console.log('PayPal payment cancelled');
-              alert('Payment cancelled by user');
               setShowPayPalPayment(false);
+              showAlert('info', 'Payment Cancelled', 'You cancelled the payment.', [
+                'No charges were made',
+                'You can try again anytime'
+              ]);
             }
           }).render('#paypal-button-container').then(() => {
             console.log('PayPal buttons rendered successfully');
@@ -1384,49 +1448,211 @@ useEffect(() => {
     setShowPayPalPayment(true);
   };
 
+  // Initialize PayPal for Cash-In
+  const initializePayPalCashIn = () => {
+    try {
+      const container = document.getElementById('paypal-cashin-container');
+      
+      if (!container) {
+        console.error('PayPal cash-in container not found');
+        return;
+      }
+
+      if (window.paypal) {
+        if (container.children.length > 0) {
+          container.innerHTML = '';
+        }
+        
+        setTimeout(() => {
+          window.paypal.Buttons({
+            createOrder: (data, actions) => {
+              console.log('Creating PayPal cash-in order for $' + cashInAmount);
+              return actions.order.create({
+                purchase_units: [{
+                  amount: {
+                    value: cashInAmount.toString(),
+                    currency_code: 'USD'
+                  },
+                  description: `StayHub Cash-In - $${cashInAmount} USD`
+                }]
+              });
+            },
+            onApprove: (data, actions) => {
+              console.log('PayPal cash-in approved...');
+              return actions.order.capture().then((details) => {
+                console.log('Cash-in payment captured:', details);
+                processCashInAfterPayment(details.id);
+              });
+            },
+            onError: (err) => {
+              console.error('PayPal cash-in error:', err);
+              alert('Cash-in failed. Please try again.');
+              setShowPayPalCashIn(false);
+            },
+            onCancel: () => {
+              console.log('PayPal cash-in cancelled');
+              alert('Cash-in cancelled');
+              setShowPayPalCashIn(false);
+            }
+          }).render('#paypal-cashin-container').then(() => {
+            console.log('PayPal cash-in buttons rendered');
+          }).catch((error) => {
+            console.error('PayPal cash-in render error:', error);
+            alert('Failed to load payment buttons. Please try again.');
+            setShowPayPalCashIn(false);
+          });
+        }, 100);
+      } else {
+        console.error('PayPal SDK not loaded');
+        alert('Payment system not ready. Please try again.');
+        setShowPayPalCashIn(false);
+      }
+    } catch (error) {
+      console.error('PayPal cash-in initialization error:', error);
+      alert('Payment system error. Please try again.');
+      setShowPayPalCashIn(false);
+    }
+  };
+
+  // Initialize PayPal for Top-Up
+  const initializePayPalTopUp = () => {
+    try {
+      const container = document.getElementById('paypal-topup-container');
+      
+      if (!container) {
+        console.error('PayPal top-up container not found');
+        return;
+      }
+
+      if (window.paypal) {
+        // Clear existing content
+        if (container.children.length > 0) {
+          container.innerHTML = '';
+        }
+        
+        setTimeout(() => {
+          window.paypal.Buttons({
+            createOrder: (data, actions) => {
+              console.log('Creating PayPal top-up order for $' + topUpAmount);
+              return actions.order.create({
+                purchase_units: [{
+                  amount: {
+                    value: topUpAmount.toString(),
+                    currency_code: 'USD'
+                  },
+                  description: `StayHub PayPal Top-Up - $${topUpAmount} USD`
+                }]
+              });
+            },
+            onApprove: (data, actions) => {
+              console.log('PayPal top-up approved...');
+              return actions.order.capture().then((details) => {
+                console.log('Top-up payment captured:', details);
+                processTopUpAfterPayment(details.id);
+              });
+            },
+            onError: (err) => {
+              console.error('PayPal top-up error:', err);
+              alert('Top-up failed. Please try again.');
+              setShowPayPalTopUpPayment(false);
+            },
+            onCancel: () => {
+              console.log('PayPal top-up cancelled');
+              alert('Top-up cancelled');
+              setShowPayPalTopUpPayment(false);
+            }
+          }).render('#paypal-topup-container').then(() => {
+            console.log('PayPal top-up buttons rendered');
+          }).catch((error) => {
+            console.error('PayPal top-up render error:', error);
+            alert('Failed to load payment buttons. Please try again.');
+            setShowPayPalTopUpPayment(false);
+          });
+        }, 100);
+      } else {
+        console.error('PayPal SDK not loaded');
+        alert('Payment system not ready. Please try again.');
+        setShowPayPalTopUpPayment(false);
+      }
+    } catch (error) {
+      console.error('PayPal top-up initialization error:', error);
+      alert('Payment system error. Please try again.');
+      setShowPayPalTopUpPayment(false);
+    }
+  };
+
   // Process booking after successful PayPal payment
-  const processBookingAfterPayment = (transactionId) => {
+  const processBookingAfterPayment = async (transactionId) => {
     if (!selectedListing || !bookingDates.checkIn || !bookingDates.checkOut) {
       alert("Booking information is missing. Please try again.");
       return;
     }
 
-    const total = calculateBookingTotal();
-    
-    // Create new booking
-    const newBooking = {
-      id: `B-${Date.now()}`,
-      title: selectedListing.title,
-      date: bookingDates.checkIn,
-      status: "Upcoming",
-      img: selectedListing.img,
-      location: selectedListing.location,
-      amenities: selectedListing.amenities,
-      reviews: selectedListing.reviews,
-      price: selectedListing.pricePerNight,
-      host: selectedListing.host,
-      checkIn: bookingDates.checkIn,
-      checkOut: bookingDates.checkOut,
-      guests: bookingGuests,
-      notes: bookingNotes,
-      total: total,
-      bookingDate: new Date().toISOString().split('T')[0],
-      paymentMethod: 'PayPal',
-      transactionId: transactionId
-    };
+    try {
+      const total = calculateBookingTotal();
+      const bookingsRef = collection(db, "bookings");
+      
+      // Parse dates
+      const checkInDate = new Date(bookingDates.checkIn);
+      const checkOutDate = new Date(bookingDates.checkOut);
+      
+      // Create booking data
+      const bookingData = {
+        listingId: selectedListing.id,
+        title: selectedListing.title,
+        checkIn: checkInDate.toISOString().split('T')[0],
+        checkOut: checkOutDate.toISOString().split('T')[0],
+        status: "PendingApproval", // Still needs host approval even after payment
+        img: selectedListing.img || "",
+        location: selectedListing.location,
+        amenities: selectedListing.amenities || [],
+        reviews: selectedListing.reviews || 0,
+        price: selectedListing.pricePerNight || selectedListing.price || 0,
+        host: selectedListing.host || "",
+        guests: bookingGuests,
+        notes: bookingNotes || "",
+        total: total,
+        paymentMethod: 'PayPal',
+        paymentStatus: 'paid', // Payment already completed
+        transactionId: transactionId,
+        hasRated: false,
+        guestId: auth.currentUser.uid,
+        guestName: profile.name,
+        guestEmail: auth.currentUser.email,
+        hostId: selectedListing.hostId || "",
+        cancelDeadline: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        bookingDate: serverTimestamp(),
+        paidAt: serverTimestamp()
+      };
 
-    // Add to bookings
-    setBookings(prev => [newBooking, ...prev]);
-    
-    // Close modals
-    setShowBookingModal(false);
-    setShowBookingConfirmation(true);
-    
-    // Reset form
-    setBookingDates({ checkIn: '', checkOut: '' });
-    setBookingGuests(2);
-    setBookingNotes('');
-    setSelectedListing(null);
+      console.log("Creating booking with PayPal transaction:", transactionId);
+
+      // Add the booking to Firestore
+      const newBookingRef = await addDoc(bookingsRef, bookingData);
+      console.log("Booking added to Firestore with ID:", newBookingRef.id);
+
+      // Update the booking with its ID
+      await updateDoc(newBookingRef, {
+        id: newBookingRef.id
+      });
+
+      console.log("✅ Booking submitted for host approval with payment completed");
+      
+      // Close modals and show confirmation
+      setShowBookingConfirmation(true);
+      
+      // Reset form
+      setBookingDates({ checkIn: '', checkOut: '' });
+      setBookingGuests(2);
+      setBookingNotes('');
+      setSelectedListing(null);
+      
+    } catch (error) {
+      console.error('Error processing booking after payment:', error);
+      alert('There was an error completing your booking. Please contact support with transaction ID: ' + transactionId);
+    }
   };
 
   // Load PayPal SDK
@@ -1435,7 +1661,8 @@ useEffect(() => {
       if (!window.paypal) {
         console.log('Loading PayPal SDK...');
         const script = document.createElement('script');
-        script.src = 'https://www.paypal.com/sdk/js?client-id=YOUR_PAYPAL_CLIENT_ID&currency=PHP';
+        // PayPal Sandbox Client ID from config
+        script.src = `https://www.paypal.com/sdk/js?client-id=${PAYPAL_CONFIG.CLIENT_ID}&currency=${PAYPAL_CONFIG.CURRENCY}`;
         script.async = true;
         script.onload = () => {
           console.log('PayPal SDK loaded');
@@ -1480,16 +1707,100 @@ useEffect(() => {
     };
   }, [showPayPalPayment]);
 
+  // Load PayPal SDK for Cash-In
+  useEffect(() => {
+    if (showPayPalCashIn) {
+      if (!window.paypal) {
+        console.log('Loading PayPal SDK for cash-in...');
+        const script = document.createElement('script');
+        script.src = `https://www.paypal.com/sdk/js?client-id=${PAYPAL_CONFIG.CLIENT_ID}&currency=${PAYPAL_CONFIG.CURRENCY}`;
+        script.async = true;
+        script.onload = () => {
+          console.log('PayPal SDK loaded for cash-in');
+          setTimeout(() => {
+            try {
+              initializePayPalCashIn();
+            } catch (error) {
+              console.error('PayPal cash-in initialization error:', error);
+              alert('Failed to initialize payment. Please try again.');
+              setShowPayPalCashIn(false);
+            }
+          }, 200);
+        };
+        script.onerror = () => {
+          console.error('Failed to load PayPal SDK');
+          alert('Failed to load payment system. Please check your internet connection.');
+          setShowPayPalCashIn(false);
+        };
+        document.body.appendChild(script);
+      } else {
+        console.log('PayPal SDK already loaded, initializing cash-in...');
+        setTimeout(() => {
+          try {
+            initializePayPalCashIn();
+          } catch (error) {
+            console.error('PayPal cash-in initialization error:', error);
+            alert('Failed to initialize payment. Please try again.');
+            setShowPayPalCashIn(false);
+          }
+        }, 200);
+      }
+    }
+  }, [showPayPalCashIn, cashInAmount]);
+
+  // Load PayPal SDK for Top-Up
+  useEffect(() => {
+    if (showPayPalTopUpPayment) {
+      if (!window.paypal) {
+        console.log('Loading PayPal SDK for top-up...');
+        const script = document.createElement('script');
+        script.src = `https://www.paypal.com/sdk/js?client-id=${PAYPAL_CONFIG.CLIENT_ID}&currency=${PAYPAL_CONFIG.CURRENCY}`;
+        script.async = true;
+        script.onload = () => {
+          console.log('PayPal SDK loaded for top-up');
+          setTimeout(() => {
+            try {
+              initializePayPalTopUp();
+            } catch (error) {
+              console.error('PayPal top-up initialization error:', error);
+              alert('Failed to initialize payment. Please try again.');
+              setShowPayPalTopUpPayment(false);
+            }
+          }, 200);
+        };
+        script.onerror = () => {
+          console.error('Failed to load PayPal SDK');
+          alert('Failed to load payment system. Please check your internet connection.');
+          setShowPayPalTopUpPayment(false);
+        };
+        document.body.appendChild(script);
+      } else {
+        console.log('PayPal SDK already loaded, initializing top-up...');
+        setTimeout(() => {
+          try {
+            initializePayPalTopUp();
+          } catch (error) {
+            console.error('PayPal top-up initialization error:', error);
+            alert('Failed to initialize payment. Please try again.');
+            setShowPayPalTopUpPayment(false);
+          }
+        }, 200);
+      }
+    }
+  }, [showPayPalTopUpPayment, topUpAmount]);
+
   // Enhanced suggestions based on booking history
   const getEnhancedSuggestions = () => {
+    const allListings = getListingsPool(); // Use full pool, not filtered searchResults
+    
     // Get categories from valid bookings
     const bookedCategories = bookings.map(b => {
       // Safely find the listing using the ID pattern
       const listingId = b.listingId || (b.id ? b.id.split('-')[1] : null);
       if (!listingId) return null;
       
-      // Look for the listing in searchResults
-      const listing = searchResults.find(l => l.id === listingId);
+      // Look for the listing in full pool
+      const listing = allListings.find(l => l.id === listingId);
       return listing ? listing.category : null;
     }).filter(Boolean); // Remove nulls
     
@@ -1512,8 +1823,8 @@ useEffect(() => {
           categoryCount[a] > categoryCount[b] ? a : b)
       : "All";
     
-    // Get suggestions from searchResults based on preferences
-    const suggestions = searchResults.filter(listing => {
+    // Get suggestions from full pool based on preferences (not filtered by current category)
+    const suggestions = allListings.filter(listing => {
       if (!listing || !listing.id) return false; // Skip invalid listings
       
       // Check if not already booked
@@ -1601,6 +1912,160 @@ useEffect(() => {
 
   return (
     <div className="min-h-screen bg-gold-50">
+      {/* Sidebar Menu */}
+      {isSidebarOpen && (
+        <>
+          {/* Overlay */}
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-50 z-50"
+            onClick={() => setIsSidebarOpen(false)}
+          />
+          
+          {/* Sidebar */}
+          <div className="fixed top-0 right-0 h-full w-80 bg-white shadow-2xl z-50 transform transition-transform duration-300">
+            {/* Sidebar Header */}
+            <div className="bg-gradient-to-r from-gold-500 to-gold-600 p-6 text-white">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-2xl font-bold">Menu</h2>
+                <button
+                  onClick={() => setIsSidebarOpen(false)}
+                  className="text-white hover:text-gray-200 transition"
+                >
+                  <FaTimes className="text-2xl" />
+                </button>
+              </div>
+              <div className="flex items-center gap-3">
+                <img
+                  src={profile.avatar}
+                  alt="avatar"
+                  className="w-14 h-14 rounded-full border-2 border-white object-cover"
+                />
+                <div>
+                  <div className="font-semibold text-lg">{profile.name}</div>
+                  <div className="text-xs text-gold-100">{profile.email}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Sidebar Menu Items */}
+            <div className="p-4">
+              <nav className="space-y-2">
+                {/* Edit Profile */}
+                <button
+                  onClick={() => {
+                    handleProfileEdit();
+                    setIsSidebarOpen(false);
+                  }}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gold-50 transition group"
+                >
+                  <FaUserCircle className="text-gold-500 text-xl group-hover:scale-110 transition" />
+                  <span className="text-gray-700 font-medium">Edit Profile</span>
+                </button>
+
+                {/* Messages */}
+                <button
+                  onClick={() => {
+                    handleOpenChatList();
+                    setIsSidebarOpen(false);
+                  }}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-blue-50 transition group"
+                >
+                  <FaRegCommentDots className="text-blue-500 text-xl group-hover:scale-110 transition" />
+                  <span className="text-gray-700 font-medium">Messages</span>
+                </button>
+
+                {/* Wallet */}
+                <button
+                  onClick={() => {
+                    setShowPayPalTopUp(true);
+                    setIsSidebarOpen(false);
+                  }}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-green-50 transition group"
+                >
+                  <FaWallet className="text-green-500 text-xl group-hover:scale-110 transition" />
+                  <div className="flex flex-col items-start">
+                    <span className="text-gray-700 font-medium">Wallet</span>
+                    <span className="text-xs text-green-600">${paypalBalance.toFixed(2)} USD</span>
+                  </div>
+                </button>
+
+                {/* Favorites */}
+                <button
+                  onClick={() => {
+                    setShowWishlist(true);
+                    setIsSidebarOpen(false);
+                  }}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-pink-50 transition group"
+                >
+                  <FaHeart className="text-pink-500 text-xl group-hover:scale-110 transition" />
+                  <div className="flex flex-col items-start">
+                    <span className="text-gray-700 font-medium">Favorites</span>
+                    <span className="text-xs text-gray-500">{favorites.length} saved</span>
+                  </div>
+                </button>
+
+                {/* Your Bookings */}
+                <button
+                  onClick={() => {
+                    setShowAllBookings(true);
+                    setIsSidebarOpen(false);
+                  }}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-purple-50 transition group"
+                >
+                  <FaListAlt className="text-purple-500 text-xl group-hover:scale-110 transition" />
+                  <div className="flex flex-col items-start">
+                    <span className="text-gray-700 font-medium">Your Bookings</span>
+                    <span className="text-xs text-gray-500">{bookings.length} total</span>
+                  </div>
+                </button>
+
+                {/* Transaction History */}
+                <button
+                  onClick={() => {
+                    setShowTransactionHistory(true);
+                    setIsSidebarOpen(false);
+                  }}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-blue-50 transition group"
+                >
+                  <FaHistory className="text-blue-500 text-xl group-hover:scale-110 transition" />
+                  <div className="flex flex-col items-start">
+                    <span className="text-gray-700 font-medium">Transaction History</span>
+                    <span className="text-xs text-gray-500">{transactions.length} transactions</span>
+                  </div>
+                </button>
+
+                {/* Account Settings */}
+                <button
+                  onClick={() => {
+                    setShowAccountSettings(true);
+                    setIsSidebarOpen(false);
+                  }}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-50 transition group"
+                >
+                  <FaCog className="text-gray-600 text-xl group-hover:scale-110 transition" />
+                  <span className="text-gray-700 font-medium">Account Settings</span>
+                </button>
+
+                {/* Divider */}
+                <div className="border-t border-gray-200 my-4"></div>
+
+                {/* Logout */}
+                <button
+                  onClick={() => {
+                    setIsSidebarOpen(false);
+                    onLogout();
+                  }}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-red-50 transition group"
+                >
+                  <FaSignOutAlt className="text-red-500 text-xl group-hover:scale-110 transition" />
+                  <span className="text-gray-700 font-medium">Logout</span>
+                </button>
+              </nav>
+            </div>
+          </div>
+        </>
+      )}
+
       {/* Sticky Airbnb-like Header */}
       {/* Sticky StayHub Header */}
 <div className="sticky top-0 z-40 border-b bg-white/90 backdrop-blur-md border-white/30 shadow-sm">
@@ -1619,56 +2084,82 @@ useEffect(() => {
         </div>
       </div>
 
-      {/* Center: Search Bar */}
-      <div className="flex-1 max-w-2xl">
-        <div className="flex items-center rounded-full border border-gold-200 shadow-sm px-3 py-2 gap-2 bg-white/70 backdrop-blur-sm">
-          <FaSearch className="text-gold-500" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleAdvancedSearch()}
-            className="bg-transparent outline-none w-full text-sm"
-            placeholder={'Where to? Try "Tagaytay"'}
-          />
+      {/* Center: Search Bar with Where, Dates, Who */}
+      <div className="flex-1 max-w-3xl">
+        <div className="flex items-center rounded-full border border-gold-200 shadow-md px-2 py-2 gap-1 bg-white">
+          {/* Where */}
+          <div className="flex items-center gap-2 px-3 py-1 flex-1 border-r border-gray-200">
+            <FaMapMarkerAlt className="text-gold-500" />
+            <div className="flex flex-col flex-1">
+              <label className="text-xs font-semibold text-gray-700">Where</label>
+              <input
+                type="text"
+                value={searchWhere}
+                onChange={(e) => {
+                  setSearchWhere(e.target.value);
+                  setSearch(e.target.value);
+                }}
+                onKeyDown={(e) => e.key === "Enter" && handleAdvancedSearch()}
+                className="bg-transparent outline-none text-sm"
+                placeholder="Search destinations"
+              />
+            </div>
+          </div>
+
+          {/* Dates */}
+          <div className="flex items-center gap-2 px-3 py-1 flex-1 border-r border-gray-200">
+            <FaCalendarAlt className="text-gold-500" />
+            <div className="flex flex-col flex-1">
+              <label className="text-xs font-semibold text-gray-700">Dates</label>
+              <input
+                type="text"
+                value={
+                  searchDates.checkIn && searchDates.checkOut
+                    ? `${new Date(searchDates.checkIn).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${new Date(searchDates.checkOut).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+                    : ""
+                }
+                className="bg-transparent outline-none text-sm cursor-pointer"
+                placeholder="Add dates"
+                readOnly
+                onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
+              />
+            </div>
+          </div>
+
+          {/* Who */}
+          <div className="flex items-center gap-2 px-3 py-1 flex-1">
+            <FaUsers className="text-gold-500" />
+            <div className="flex flex-col flex-1">
+              <label className="text-xs font-semibold text-gray-700">Who</label>
+              <input
+                type="text"
+                value={searchGuests > 0 ? `${searchGuests} guest${searchGuests > 1 ? 's' : ''}` : ""}
+                className="bg-transparent outline-none text-sm cursor-pointer"
+                placeholder="Add guests"
+                readOnly
+                onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
+              />
+            </div>
+          </div>
+
+          {/* Search Button */}
           <button
             onClick={handleAdvancedSearch}
-            className="bg-gold-gradient text-white text-sm px-3 py-1 rounded-full hover:scale-105 transition"
+            className="bg-gold-500 text-white p-3 rounded-full hover:bg-gold-600 transition"
+            title="Search"
           >
-            Search
-          </button>
-          <button
-            onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
-            className="p-2 rounded-full hover:bg-gold-50 transition"
-            title="Advanced Filters"
-          >
-            <FaFilter className="text-gold-500" />
+            <FaSearch />
           </button>
         </div>
       </div>
 
-      {/* Right: Actions */}
+      {/* Right: Menu Button */}
       <button
-        onClick={handleOpenChatList}
-        className="hidden sm:flex items-center gap-2 border border-blue-200 px-3 py-2 rounded-full hover:shadow hover:bg-blue-50 text-blue-600"
+        onClick={() => setIsSidebarOpen(true)}
+        className="flex items-center gap-2 border border-gold-200 px-3 py-2 rounded-full hover:shadow hover:bg-gold-50 transition"
       >
-        <FaRegCommentDots className="text-blue-500" />
-        <span className="text-sm">Messages</span>
-      </button>
-      <button
-        onClick={handleProfileEdit}
-        className="hidden sm:flex items-center gap-2 border border-gold-200 px-3 py-2 rounded-full hover:shadow hover:bg-gold-50 transition"
-      >
-        <FaUserCircle className="text-gold-500" />
-        <span className="text-sm text-gray-700">Edit Profile</span>
-      </button>
-
-      <button
-        onClick={onLogout}
-        className="hidden sm:flex items-center gap-2 border border-red-200 px-3 py-2 rounded-full hover:shadow hover:bg-red-50 text-red-600"
-      >
-        <FaSignOutAlt className="text-red-500" />
-        <span className="text-sm">Logout</span>
+        <FaBars className="text-gold-500 text-xl" />
+        <span className="text-sm text-gray-700 hidden sm:inline">Menu</span>
       </button>
     </div>
   </div>
@@ -1735,11 +2226,64 @@ useEffect(() => {
 
         {/* Advanced Filters Panel */}
         {showAdvancedFilters && (
-          <div className="bg-gray-50 rounded-xl p-6 mb-6 border">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="bg-white rounded-xl p-6 mb-6 border shadow-lg">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-bold text-lg">Search Filters</h3>
+              <button
+                onClick={() => setShowAdvancedFilters(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <FaTimes />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Check-in Date */}
+              <div>
+                <label className="block text-sm font-semibold mb-2">Check-in Date</label>
+                <input
+                  type="date"
+                  value={searchDates.checkIn}
+                  onChange={(e) => setSearchDates({ ...searchDates, checkIn: e.target.value })}
+                  min={new Date().toISOString().split('T')[0]}
+                  className="w-full border rounded-lg px-3 py-2 text-sm"
+                />
+              </div>
+
+              {/* Check-out Date */}
+              <div>
+                <label className="block text-sm font-semibold mb-2">Check-out Date</label>
+                <input
+                  type="date"
+                  value={searchDates.checkOut}
+                  onChange={(e) => setSearchDates({ ...searchDates, checkOut: e.target.value })}
+                  min={searchDates.checkIn || new Date().toISOString().split('T')[0]}
+                  className="w-full border rounded-lg px-3 py-2 text-sm"
+                />
+              </div>
+
+              {/* Number of Guests */}
+              <div>
+                <label className="block text-sm font-semibold mb-2">Number of Guests</label>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setSearchGuests(Math.max(1, searchGuests - 1))}
+                    className="bg-gray-200 hover:bg-gray-300 w-8 h-8 rounded-full flex items-center justify-center"
+                  >
+                    -
+                  </button>
+                  <span className="text-lg font-semibold">{searchGuests}</span>
+                  <button
+                    onClick={() => setSearchGuests(searchGuests + 1)}
+                    className="bg-gray-200 hover:bg-gray-300 w-8 h-8 rounded-full flex items-center justify-center"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
               {/* Price Range */}
               <div>
-                <label className="block text-sm font-semibold mb-2">Price Range</label>
+                <label className="block text-sm font-semibold mb-2">Price Range (per night)</label>
                 <div className="flex items-center gap-2">
                   <span className="text-sm">₱{priceRange[0].toLocaleString()}</span>
                   <input
@@ -1755,10 +2299,10 @@ useEffect(() => {
               </div>
 
               {/* Amenities */}
-              <div>
+              <div className="md:col-span-2">
                 <label className="block text-sm font-semibold mb-2">Amenities</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {(availableAmenities || []).slice(0, 6).map((amenity) => (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  {(availableAmenities || []).slice(0, 8).map((amenity) => (
                     <label key={amenity.name} className="flex items-center gap-2 text-sm">
                       <input
                         type="checkbox"
@@ -1779,27 +2323,31 @@ useEffect(() => {
                 </div>
               </div>
 
-              {/* Quick Actions */}
-              <div>
-                <label className="block text-sm font-semibold mb-2">Quick Actions</label>
-                <div className="space-y-2">
-                  <button
-                    onClick={() => {
-                      setPriceRange([0, 10000]);
-                      setSelectedAmenities([]);
-                      setActiveCategory("All");
-                    }}
-                    className="w-full text-sm text-gold-600 hover:text-gold-700 underline"
-                  >
-                    Clear all filters
-                  </button>
-                  <button
-                    onClick={handleAdvancedSearch}
-                    className="w-full bg-gold-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-gold-600 transition"
-                  >
-                    Apply Filters
-                  </button>
-                </div>
+              {/* Action Buttons */}
+              <div className="md:col-span-2 flex gap-3">
+                <button
+                  onClick={() => {
+                    setPriceRange([0, 10000]);
+                    setSelectedAmenities([]);
+                    setActiveCategory("All");
+                    setSearchDates({ checkIn: "", checkOut: "" });
+                    setSearchGuests(1);
+                    setSearchWhere("");
+                    setSearch("");
+                  }}
+                  className="flex-1 text-sm text-gold-600 hover:text-gold-700 border border-gold-600 px-4 py-2 rounded-lg font-semibold"
+                >
+                  Clear all filters
+                </button>
+                <button
+                  onClick={() => {
+                    handleAdvancedSearch();
+                    setShowAdvancedFilters(false);
+                  }}
+                  className="flex-1 bg-gold-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-gold-600 transition font-semibold"
+                >
+                  Apply Filters
+                </button>
               </div>
             </div>
           </div>
@@ -1874,148 +2422,416 @@ useEffect(() => {
           </div>
         )}
 
-        {/* Enhanced Search Results */}
-          {searchResults.length > 0 && (
-          <div className="mb-10">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="font-bold text-lg">Explore stays</h2>
-              <span className="text-sm text-gray-500">
-                {searchResults.length} {searchResults.length === 1 ? "place" : "places"}
-              </span>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-              {searchResults.map((l) => (
-            <div
-              key={l.id}
-              className="group flex flex-col justify-between bg-white rounded-2xl shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-300 h-full"
-            >
-              {/* Image Section */}
-              <div className="relative overflow-hidden rounded-2xl aspect-[4/3] bg-gray-100">
-                <img
-                  src={l.img}
-                  alt={l.title}
-                  className="h-full w-full object-cover group-hover:scale-105 transition duration-300"
-                />
+        {/* Account Settings Modal */}
+        {showAccountSettings && (
+          <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-lg w-full max-w-md relative">
+              <div className="bg-gradient-to-r from-gray-700 to-gray-800 p-6 text-white rounded-t-xl">
                 <button
-                  onClick={() => toggleFavorite(l)}
-                  className="absolute top-3 right-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
-                  aria-label="Toggle favorite"
+                  onClick={() => setShowAccountSettings(false)}
+                  className="absolute top-4 right-4 text-white hover:text-gray-200 transition"
                 >
-                  <FaHeart
-                    className={
-                      isFavorited(l.id) ? "text-gold-600" : "text-gray-400"
-                    }
-                  />
+                  <FaTimes className="text-xl" />
                 </button>
-                <button
-                  onClick={() => setShowShareModal(l)}
-                  className="absolute top-3 left-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
-                  aria-label="Share"
-                >
-                  <FaShareAlt className="text-gray-400" />
-                </button>
-                <div className="absolute bottom-3 left-3 flex items-center gap-1 text-white bg-black/50 px-2 py-1 rounded-full text-xs">
-                  <FaStar className="text-yellow-300" /> {l.reviews || l.rating || "New"}
-                </div>
-                <div className="absolute bottom-3 right-3 bg-white/80 text-xs px-2 py-1 rounded-full">
-                  {l.calendar}
+                <div className="flex items-center gap-3">
+                  <FaCog className="text-3xl" />
+                  <div>
+                    <h3 className="text-2xl font-bold">Account Settings</h3>
+                    <p className="text-gray-300 text-sm">Manage your preferences</p>
+                  </div>
                 </div>
               </div>
-
-              {/* Map Section (coordinates preferred, fallback to place search) */}
-              {(l?.coordinates?.lat && l?.coordinates?.lng) || (l?.location || l?.title) ? (
-                <div className="mt-2 px-3">
-                  <div className="overflow-hidden rounded-lg border">
-                    <iframe
-                      title={`map-${l.id}`}
-                      src={
-                        l?.coordinates?.lat && l?.coordinates?.lng
-                          ? `https://www.google.com/maps?q=${encodeURIComponent(l.coordinates.lat)},${encodeURIComponent(l.coordinates.lng)}&z=14&output=embed`
-                          : `https://www.google.com/maps?q=${encodeURIComponent(`${l?.title || ''} ${l?.location || ''}`.trim())}&z=14&output=embed`
-                      }
-                      className="w-full h-28"
-                      loading="lazy"
-                      allowFullScreen
-                      referrerPolicy="no-referrer-when-downgrade"
+              
+              <div className="p-6 space-y-4">
+                {/* Notifications */}
+                <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    <FaRegCommentDots className="text-blue-500 text-xl" />
+                    <div>
+                      <div className="font-semibold">Push Notifications</div>
+                      <div className="text-xs text-gray-500">Receive booking updates</div>
+                    </div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={profile.preferences.notifications}
+                      onChange={(e) => {
+                        setProfile(prev => ({
+                          ...prev,
+                          preferences: { ...prev.preferences, notifications: e.target.checked }
+                        }));
+                      }}
+                      className="sr-only peer"
                     />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-gold-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gold-500"></div>
+                  </label>
+                </div>
+
+                {/* Email Updates */}
+                <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    <FaEnvelope className="text-green-500 text-xl" />
+                    <div>
+                      <div className="font-semibold">Email Updates</div>
+                      <div className="text-xs text-gray-500">Get promotional emails</div>
+                    </div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={profile.preferences.emailUpdates}
+                      onChange={(e) => {
+                        setProfile(prev => ({
+                          ...prev,
+                          preferences: { ...prev.preferences, emailUpdates: e.target.checked }
+                        }));
+                      }}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-gold-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gold-500"></div>
+                  </label>
+                </div>
+
+                {/* SMS Updates */}
+                <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    <FaPhone className="text-purple-500 text-xl" />
+                    <div>
+                      <div className="font-semibold">SMS Updates</div>
+                      <div className="text-xs text-gray-500">Receive text messages</div>
+                    </div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={profile.preferences.smsUpdates}
+                      onChange={(e) => {
+                        setProfile(prev => ({
+                          ...prev,
+                          preferences: { ...prev.preferences, smsUpdates: e.target.checked }
+                        }));
+                      }}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-gold-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gold-500"></div>
+                  </label>
+                </div>
+
+                {/* Privacy */}
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <div className="flex items-center gap-3 mb-2">
+                    <FaLock className="text-red-500 text-xl" />
+                    <div className="font-semibold">Privacy & Security</div>
+                  </div>
+                  <div className="text-xs text-gray-600 ml-8">
+                    Your data is encrypted and secure. We never share your personal information with third parties.
                   </div>
                 </div>
-              ) : null}
 
-              {/* Content Section */}
-              <div className="flex flex-col flex-grow mt-2 px-3">
-                <div className="flex items-center justify-between">
-                  <div className="font-semibold truncate mr-2">{l.title}</div>
-                  <div className="text-sm font-semibold">
-                    ₱{l.pricePerNight?.toLocaleString?.() || "—"}
-                    <span className="text-gray-500 text-xs"> /night</span>
-                  </div>
-                </div>
-                <div className="text-sm text-gray-500 truncate">
-                  {l.location} • {l.category}
-                </div>
-                <div className="text-xs text-gray-400 mt-1">Hosted by {l.host}</div>
-
-                <div className="flex flex-wrap items-center gap-1 mt-2">
-                  {l.amenities.slice(0, 3).map((amenity, idx) => (
-                    <span
-                      key={idx}
-                      className="text-xs bg-gray-100 px-2 py-1 rounded-full"
-                    >
-                      {amenity}
-                    </span>
-                  ))}
-                  {l.amenities.length > 3 && (
-                    <span className="text-xs text-gray-500">
-                      +{l.amenities.length - 3} more
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Buttons Section (Always Bottom Aligned) */}
-              <div className="mt-auto flex gap-2 pt-4 px-3 pb-3">
                 <button
-                  onClick={() => handleBookListing(l)}
-                  className="flex-1 bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded-lg shadow-md transition"
+                  onClick={async () => {
+                    try {
+                      const userId = auth.currentUser?.uid;
+                      if (userId) {
+                        // Save preferences to Firestore
+                        await updateDoc(doc(db, "users", userId), {
+                          preferences: profile.preferences,
+                          updatedAt: new Date()
+                        });
+                        
+                        // Update localStorage as backup
+                        localStorage.setItem(`guestProfile_${userId}`, JSON.stringify({
+                          name: profile.name,
+                          phone: profile.phone,
+                          avatar: profile.avatar,
+                          preferences: profile.preferences
+                        }));
+                        
+                        alert('Settings saved successfully!');
+                      }
+                    } catch (error) {
+                      console.error('Error saving settings:', error);
+                      alert('Failed to save settings. Please try again.');
+                    }
+                    setShowAccountSettings(false);
+                  }}
+                  className="w-full bg-gold-500 text-white px-6 py-3 rounded-lg shadow hover:bg-gold-600 transition font-semibold"
                 >
-                  Book Now
-                </button>
-                <button
-                  onClick={() => handleMessageHost(l)}
-                  className="flex-1 bg-blue-500 text-white rounded-lg text-sm font-semibold hover:bg-blue-600 transition flex items-center justify-center gap-1"
-                >
-                  <FaEnvelope className="text-xs" />
-                  Message
+                  Save Settings
                 </button>
               </div>
             </div>
-          ))}
+          </div>
+        )}
+
+        {/* Favorites Modal */}
+        {showWishlist && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden">
+              <div className="bg-gradient-to-r from-pink-500 to-pink-600 p-6 text-white">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <FaHeart className="text-3xl" />
+                    <div>
+                      <h3 className="text-2xl font-bold">Your Favorites</h3>
+                      <p className="text-pink-100 text-sm">{favorites.length} saved places</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowWishlist(false)}
+                    className="text-white hover:text-gray-200 transition"
+                  >
+                    <FaTimes className="text-2xl" />
+                  </button>
+                </div>
+              </div>
+              
+              <div className="p-6 overflow-y-auto max-h-[calc(90vh-120px)]">
+                {favorites.length === 0 ? (
+                  <div className="text-center py-12">
+                    <FaHeart className="text-6xl text-gray-300 mx-auto mb-4" />
+                    <p className="text-gray-500 text-lg">No favorites yet</p>
+                    <p className="text-gray-400 text-sm mt-2">Start adding your favorite places!</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {favorites.map((fav) => (
+                      <div key={fav.id} className="bg-white rounded-xl border hover:shadow-lg transition group">
+                        <div className="relative">
+                          <img src={fav.img} alt={fav.title} className="w-full h-48 rounded-t-xl object-cover" />
+                          <button
+                            onClick={() => toggleFavorite(fav)}
+                            className="absolute top-3 right-3 p-2 rounded-full bg-white/90 hover:bg-white shadow"
+                          >
+                            <FaHeart className="text-pink-500" />
+                          </button>
+                        </div>
+                        <div className="p-4">
+                          <div className="font-semibold text-lg mb-1">{fav.title}</div>
+                          <div className="text-sm text-gray-500 mb-2">{fav.location}</div>
+                          <div className="text-sm font-semibold text-gold-600">
+                            ₱{fav.pricePerNight?.toLocaleString() || fav.price?.toLocaleString()}/night
+                          </div>
+                          <button
+                            onClick={() => {
+                              handleBookListing(fav);
+                              setShowWishlist(false);
+                            }}
+                            className="w-full mt-3 bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded-lg transition"
+                          >
+                            Book Now
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Your Bookings Modal */}
+        {showAllBookings && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-6xl max-h-[90vh] overflow-hidden">
+              <div className="bg-gradient-to-r from-purple-500 to-purple-600 p-6 text-white">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <FaListAlt className="text-3xl" />
+                    <div>
+                      <h3 className="text-2xl font-bold">Your Bookings</h3>
+                      <p className="text-purple-100 text-sm">{bookings.length} total bookings</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowAllBookings(false)}
+                    className="text-white hover:text-gray-200 transition"
+                  >
+                    <FaTimes className="text-2xl" />
+                  </button>
+                </div>
+              </div>
+              
+              <div className="p-6 overflow-y-auto max-h-[calc(90vh-120px)]">
+                {bookings.length === 0 ? (
+                  <div className="text-center py-12">
+                    <FaListAlt className="text-6xl text-gray-300 mx-auto mb-4" />
+                    <p className="text-gray-500 text-lg">No bookings yet</p>
+                    <p className="text-gray-400 text-sm mt-2">Book your first stay to get started!</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {/* Pending Approval Section */}
+                    {bookings.filter(b => b.status === "PendingApproval").length > 0 && (
+                      <div className="mb-6">
+                        <h4 className="font-bold text-lg mb-3 flex items-center gap-2">
+                          <FaSpinner className="text-yellow-500 animate-spin" /> Pending Approval
+                        </h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {bookings.filter(b => b.status === "PendingApproval").map((b) => (
+                            <div key={b.id} className="bg-yellow-50 border-2 border-yellow-300 rounded-xl p-4">
+                              <div className="flex gap-3">
+                                <img src={b.img} alt={b.title} className="w-20 h-20 rounded-lg object-cover" />
+                                <div className="flex-1">
+                                  <div className="font-semibold">{b.title}</div>
+                                  <div className="text-sm text-gray-500">{b.location}</div>
+                                  <div className="text-xs text-gray-500 mt-1">
+                                    {b.displayCheckIn} - {b.displayCheckOut}
+                                  </div>
+                                  <div className="mt-2 flex items-center gap-2">
+                                    <span className="bg-yellow-200 text-yellow-800 px-2 py-1 rounded-full text-xs font-medium">
+                                      {b.status}
+                                    </span>
+                                    <button
+                                      onClick={() => handleCancelPendingBooking(b)}
+                                      className="bg-red-500 text-white px-3 py-1 rounded text-xs hover:bg-red-600 flex items-center gap-1 transition"
+                                    >
+                                      <FaTimes /> Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Upcoming Bookings */}
+                    {bookings.filter(b => b.status === "Upcoming").length > 0 && (
+                      <div className="mb-6">
+                        <h4 className="font-bold text-lg mb-3 flex items-center gap-2">
+                          <FaCalendarAlt className="text-green-500" /> Upcoming
+                        </h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {bookings.filter(b => b.status === "Upcoming").map((b) => (
+                            <div key={b.id} className="bg-white border rounded-xl p-4 hover:shadow-lg transition">
+                              <div className="flex gap-3">
+                                <img src={b.img} alt={b.title} className="w-20 h-20 rounded-lg object-cover" />
+                                <div className="flex-1">
+                                  <div className="font-semibold">{b.title}</div>
+                                  <div className="text-sm text-gray-500">{b.location}</div>
+                                  <div className="text-xs text-gray-500 mt-1">
+                                    {b.displayCheckIn} - {b.displayCheckOut}
+                                  </div>
+                                  <div className="mt-2 flex items-center gap-2">
+                                    <span className="bg-green-100 text-green-700 px-2 py-1 rounded-full text-xs font-medium">
+                                      {b.status}
+                                    </span>
+                                    <button
+                                      onClick={() => handleCancelPendingBooking(b)}
+                                      className="bg-red-500 text-white px-3 py-1 rounded text-xs hover:bg-red-600 flex items-center gap-1 transition"
+                                    >
+                                      <FaTimes /> Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Completed Bookings */}
+                    {bookings.filter(b => b.status === "Completed").length > 0 && (
+                      <div className="mb-6">
+                        <h4 className="font-bold text-lg mb-3 flex items-center gap-2">
+                          <FaHistory className="text-blue-500" /> Completed
+                        </h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {bookings.filter(b => b.status === "Completed").map((b) => (
+                            <div key={b.id} className="bg-white border rounded-xl p-4 hover:shadow-lg transition">
+                              <div className="flex gap-3">
+                                <img src={b.img} alt={b.title} className="w-20 h-20 rounded-lg object-cover" />
+                                <div className="flex-1">
+                                  <div className="font-semibold">{b.title}</div>
+                                  <div className="text-sm text-gray-500">{b.location}</div>
+                                  <div className="text-xs text-gray-500 mt-1">
+                                    {b.displayCheckIn} - {b.displayCheckOut}
+                                  </div>
+                                  <div className="mt-2 flex items-center gap-2">
+                                    <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded-full text-xs font-medium">
+                                      {b.status}
+                                    </span>
+                                    {!b.hasRated && (
+                                      <button
+                                        onClick={() => {
+                                          handleOpenRating(b);
+                                          setShowAllBookings(false);
+                                        }}
+                                        className="bg-yellow-400 text-white px-2 py-1 rounded text-xs hover:bg-yellow-500 flex items-center gap-1"
+                                      >
+                                        <FaStar /> Rate
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Declined/Cancelled Bookings */}
+                    {bookings.filter(b => b.status === "Declined" || b.status === "CancelledByGuest").length > 0 && (
+                      <div>
+                        <h4 className="font-bold text-lg mb-3 flex items-center gap-2">
+                          <FaExclamationTriangle className="text-red-500" /> Declined/Cancelled
+                        </h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {bookings.filter(b => b.status === "Declined" || b.status === "CancelledByGuest").map((b) => (
+                            <div key={b.id} className="bg-white border rounded-xl p-4 opacity-75">
+                              <div className="flex gap-3">
+                                <img src={b.img} alt={b.title} className="w-20 h-20 rounded-lg object-cover grayscale" />
+                                <div className="flex-1">
+                                  <div className="font-semibold">{b.title}</div>
+                                  <div className="text-sm text-gray-500">{b.location}</div>
+                                  <div className="text-xs text-gray-500 mt-1">
+                                    {b.displayCheckIn} - {b.displayCheckOut}
+                                  </div>
+                                  <div className="mt-2">
+                                    <span className="bg-red-100 text-red-700 px-2 py-1 rounded-full text-xs font-medium">
+                                      {b.status}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
 
         {/* Enhanced Explore Grid */}
         <div className="mb-12">
-          <div className="flex items-center justify-between mb-4">
-            {/* <div className="font-bold text-xl">Explore stays</div>
+          <div className="flex items-center justify-between mb-6">
+            <div className="font-bold text-2xl text-gray-800">Explore Stays</div>
             <div className="text-sm text-gray-500">
-              {searchResults.filter(l => activeCategory === "All" ? true : l.category === activeCategory).length} places
-            </div> */}
+              {(searchQuery ? searchResults : getListingsPool())
+                .filter(l => activeCategory === "All" ? true : l.category === activeCategory).length} places
+            </div>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-            {/* Display filtered search results only when there's a search query */}
-            {searchQuery ? (
-              searchResults.filter((l) =>
-                activeCategory === "All" ? true : l.category === activeCategory
-              ).length > 0 ? (
-                searchResults
-                  .filter((l) =>
-                    activeCategory === "All" ? true : l.category === activeCategory
-                  )
+            {/* Display search results - filtered by search query AND active category */}
+            {(searchQuery ? searchResults : getListingsPool())
+              .filter((l) => activeCategory === "All" ? true : l.category === activeCategory)
+              .length > 0 ? (
+                (searchQuery ? searchResults : getListingsPool())
+                  .filter((l) => activeCategory === "All" ? true : l.category === activeCategory)
                   .map((l) => (
-                    <div key={l.id} className="group cursor-pointer">
-                      <div className="relative overflow-hidden rounded-2xl aspect-[4/3] bg-gray-100">
+                    <div key={l.id} className="group flex flex-col bg-white rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 overflow-hidden h-full">
+                      {/* Image Section */}
+                      <div className="relative overflow-hidden aspect-[4/3] bg-gray-100">
                         <img
                           src={l.img}
                           alt={l.title}
@@ -2040,15 +2856,17 @@ useEffect(() => {
                           <FaShareAlt className="text-gray-400" />
                         </button>
                         <div className="absolute bottom-3 left-3 flex items-center gap-1 text-white bg-black/50 px-2 py-1 rounded-full text-xs">
-                          <FaStar className="text-yellow-300" /> {l.reviews || l.rating || "New"}
+                          <FaStar className="text-yellow-300" /> {renderReviewsRating(l.reviews) || renderReviewsRating(l.rating) || "New"}
                         </div>
                         <div className="absolute bottom-3 right-3 bg-white/80 text-xs px-2 py-1 rounded-full">
                           {l.calendar}
                         </div>
                       </div>
+
+                      {/* Map Section */}
                       {(l?.coordinates?.lat && l?.coordinates?.lng) || (l?.location || l?.title) ? (
-                        <div className="mt-2">
-                          <div className="overflow-hidden rounded-lg border">
+                        <div className="w-full">
+                          <div className="overflow-hidden">
                             <iframe
                               title={`map-${l.id}`}
                               src={
@@ -2064,19 +2882,21 @@ useEffect(() => {
                           </div>
                         </div>
                       ) : null}
-                      <div className="mt-2">
-                        <div className="flex items-center justify-between">
-                          <div className="font-semibold truncate mr-2">{l.title}</div>
-                          <div className="text-sm font-semibold">
+
+                      {/* Content Section */}
+                      <div className="flex flex-col flex-grow p-3">
+                        <div className="flex items-start justify-between mb-2">
+                          <div className="font-semibold truncate mr-2 flex-1">{l.title}</div>
+                          <div className="text-sm font-semibold whitespace-nowrap">
                             ₱{(l.pricePerNight || l.price)?.toLocaleString?.()}{" "}
                             <span className="text-gray-500 text-xs">night</span>
                           </div>
                         </div>
-                        <div className="text-sm text-gray-500 truncate">
+                        <div className="text-sm text-gray-500 truncate mb-1">
                           {l.location} • {l.category}
                         </div>
-                        <div className="text-xs text-gray-400 mt-1">Hosted by {l.host}</div>
-                        <div className="flex items-center gap-1 mt-1">
+                        <div className="text-xs text-gray-400 mb-2">Hosted by {l.host}</div>
+                        <div className="flex flex-wrap items-center gap-1 mb-3">
                           {(l.amenities || []).slice(0, 3).map((amenity, idx) => (
                             <span
                               key={idx}
@@ -2091,16 +2911,18 @@ useEffect(() => {
                             </span>
                           )}
                         </div>
-                        <div className="mt-3 grid grid-cols-2 gap-2">
+                        
+                        {/* Buttons at bottom */}
+                        <div className="mt-auto grid grid-cols-2 gap-2">
                           <button
                             onClick={() => handleBookListing(l)}
-                            className="bg-gold-500 hover:bg-gold-600 text-white px-5 py-2 rounded-lg shadow-md transition"
+                            className="bg-gold-500 hover:bg-gold-600 text-white px-4 py-2 rounded-lg shadow-md transition text-sm font-semibold"
                           >
                             Book Now
                           </button>
                           <button
                             onClick={() => handleMessageHost(l)}
-                            className="bg-blue-500 hover:bg-blue-600 text-white px-5 py-2 rounded-lg shadow-md transition flex items-center justify-center gap-1 text-sm"
+                            className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg shadow-md transition flex items-center justify-center gap-1 text-sm font-semibold"
                           >
                             <FaEnvelope className="text-xs" /> Message
                           </button>
@@ -2108,10 +2930,12 @@ useEffect(() => {
                       </div>
                     </div>
                   ))
-              ) : (
-                <div className="text-gray-400 text-center py-8">No results found.</div>
-              )
-            ) : null}
+            ) : (
+              <div className="col-span-full text-center py-12">
+                <div className="text-6xl mb-4">🔍</div>
+                <p className="text-gray-500">No results found. Try adjusting your filters.</p>
+              </div>
+            )}
           </div>
         </div>
 
@@ -2151,186 +2975,94 @@ useEffect(() => {
           )}
         </div> */}
 
-        {/* Main Grid: Favorites and Bookings */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          {/* Favorites */}
-          <div>
-            <div className="font-bold text-lg mb-2 flex items-center gap-2">
-              <FaHeart className="text-gold-400" /> Favorites
-              <button
-                onClick={handleShowWishlist}
-                className="ml-auto text-xs text-gold-600 underline"
-              >
-                {showWishlist ? "Hide" : "Show"}
-              </button>
-            </div>
-            {showWishlist && (
-              <div className="space-y-4">
-                {favorites.length === 0 && <div className="text-gray-400">No favorites yet.</div>}
-                {favorites.map((fav) => (
-                  <div key={fav.id} className="bg-white rounded-xl border p-3 flex items-center gap-3 hover:shadow-sm transition">
-                    <img src={fav.img} alt={fav.title} className="w-14 h-14 rounded-lg object-cover" />
-                    <div className="flex-1">
-                      <div className="font-semibold">{fav.title}</div>
-                    </div>
-                    <button
-                    onClick={() => toggleFavorite(fav)}
-                    title={isFavorited(fav.id) ? "Unfavorite" : "Add to favorites"}
-                  >
-                    <FaHeart
-                      className={`text-xl transition ${
-                        isFavorited(fav.id)
-                          ? "text-red-500"
-                          : "text-gray-400 hover:text-red-400"
-                      }`}
-                    />
-                  </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Bookings */}
-          <div className="md:col-span-2">
-            <div className="font-bold text-lg mb-2 flex items-center gap-2">
-              <FaListAlt className="text-blue-400" /> Your Bookings
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {bookings.map((b) => (
-                <div key={b.id} className="bg-white rounded-xl border hover:shadow-md transition-shadow duration-200">
-                  <div className="p-4">
-                    <div className="flex gap-3 items-start">
-                      <img src={b.img} alt={b.title} className="w-20 h-20 rounded-lg object-cover" />
-                      <div className="flex-1">
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <div className="font-semibold text-lg">{b.title}</div>
-                            <div className="text-sm text-gray-500 mb-1">
-                              Check-in: {b.displayCheckIn} • Check-out: {b.displayCheckOut}
-                            </div>
-                            <div className="text-xs text-blue-500">
-                              Booked on: {b.displayBookingDate}
-                            </div>
-                            <div className="text-sm text-gray-500 mt-1">{b.location}</div>
-                          </div>
-                          <button
-                            onClick={() => setShowBookingShareModal(b)}
-                            className="p-2 text-blue-400 hover:text-blue-600 hover:bg-blue-50 rounded-full transition-colors"
-                            title="Share Booking"
-                          >
-                            <FaShareAlt />
-                          </button>
-                        </div>
-                        <div className="mt-2">
-                          <span className={
-                            b.status === "Upcoming" 
-                              ? "bg-green-100 text-green-700 px-2 py-1 rounded-full text-sm font-medium"
-                              : "bg-gray-100 text-gray-600 px-2 py-1 rounded-full text-sm"
-                          }>
-                            {b.status}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  {/* Rating Section - Moved outside the main content for more prominence */}
-                  {b.status === "Completed" && !b.hasRated && (
-                    <div className="border-t bg-yellow-50 p-4 mt-2">
-                      <div className="flex justify-between items-center">
-                        <div className="flex items-center gap-2">
-                          <FaStar className="text-yellow-500" />
-                          <div>
-                            <div className="font-medium text-yellow-800">Rate Your Stay!</div>
-                            <div className="text-sm text-yellow-700">Help others by sharing your experience</div>
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => handleOpenRating(b)}
-                          className="bg-yellow-400 text-white px-4 py-2 rounded-lg hover:bg-yellow-500 transition font-medium flex items-center gap-2 shadow-sm"
-                        >
-                          <FaStar /> Rate Now
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {b.status === "Completed" && b.hasRated && (
-                    <div className="border-t bg-green-50 p-4 mt-2">
-                      <div className="flex justify-between items-center">
-                        <div className="flex items-center gap-2">
-                          <div className="flex gap-1 text-yellow-400">
-                            {[...Array(b.rating)].map((_, i) => (
-                              <FaStar key={i} />
-                            ))}
-                          </div>
-                          <div className="text-green-700 font-medium">
-                            Thank you for rating!
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => handleViewBookingDetails(b)}
-                          className="text-green-600 hover:text-green-700 text-sm font-medium"
-                        >
-                          View Details
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {b.status === "Upcoming" && (
-                    <div className="border-t p-4 bg-gray-50">
-                      <div className="flex justify-between items-center">
-                        <div className="text-sm text-gray-500">
-                          Don't forget to rate after your stay!
-                        </div>
-                        <button
-                          onClick={() => handleViewBookingDetails(b)}
-                          className="text-blue-600 hover:text-blue-700 text-sm font-medium"
-                        >
-                          View Details
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
 
         {/* Rating Modal */}
         {showRatingModal && selectedBookingToRate && (
-          <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-            <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-md relative">
-              <button
-                onClick={() => setShowRatingModal(false)}
-                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-gold-500"
-              >
-                ×
-              </button>
-              <div className="text-center mb-6">
-                <h3 className="text-xl font-bold">Rate Your Stay</h3>
-                <p className="text-gray-500 text-sm mt-1">{selectedBookingToRate.title}</p>
-              </div>
-              <div className="space-y-4">
-                <div className="flex justify-center">
-                  <StarRating rating={rating} onRatingChange={setRating} />
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg relative overflow-hidden">
+              {/* Header */}
+              <div className="bg-gradient-to-r from-yellow-400 to-orange-400 p-6 text-white">
+                <button
+                  onClick={() => setShowRatingModal(false)}
+                  className="absolute top-4 right-4 text-white hover:text-gray-200 text-2xl"
+                >
+                  ×
+                </button>
+                <div className="flex items-center gap-3">
+                  <FaStar className="text-3xl" />
+                  <div>
+                    <h3 className="text-2xl font-bold">Rate Your Stay</h3>
+                    <p className="text-yellow-50 text-sm mt-1">
+                      Share your experience
+                    </p>
+                  </div>
                 </div>
+              </div>
+
+              {/* Booking Info */}
+              <div className="p-6 bg-gray-50 border-b">
+                <div className="flex items-center gap-3">
+                  <img 
+                    src={selectedBookingToRate.img} 
+                    alt={selectedBookingToRate.title}
+                    className="w-16 h-16 rounded-lg object-cover"
+                  />
+                  <div>
+                    <h4 className="font-semibold text-gray-900">
+                      {selectedBookingToRate.title}
+                    </h4>
+                    <p className="text-sm text-gray-600">
+                      {selectedBookingToRate.displayCheckIn} - {selectedBookingToRate.displayCheckOut}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {selectedBookingToRate.location}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Rating Section */}
+              <div className="p-6 space-y-6">
                 <div>
-                  <label className="block text-sm font-semibold mb-2">Your Review</label>
+                  <label className="block text-center text-sm font-semibold text-gray-700 mb-3">
+                    How would you rate your stay?
+                  </label>
+                  <div className="flex justify-center mb-2">
+                    <StarRating rating={rating} onRatingChange={setRating} />
+                  </div>
+                  <div className="text-center">
+                    {rating === 0 && <p className="text-sm text-gray-400">Select a rating</p>}
+                    {rating === 1 && <p className="text-sm text-red-500 font-medium">Poor</p>}
+                    {rating === 2 && <p className="text-sm text-orange-500 font-medium">Fair</p>}
+                    {rating === 3 && <p className="text-sm text-yellow-500 font-medium">Good</p>}
+                    {rating === 4 && <p className="text-sm text-blue-500 font-medium">Very Good</p>}
+                    {rating === 5 && <p className="text-sm text-green-500 font-medium">Excellent!</p>}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Write a Review (Optional)
+                  </label>
                   <textarea
                     value={review}
                     onChange={(e) => setReview(e.target.value)}
-                    placeholder="Share your experience..."
-                    className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-gold-500 h-32 resize-none"
+                    placeholder="Tell others about your experience..."
+                    className="w-full border border-gray-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-yellow-400 focus:border-transparent h-32 resize-none"
+                    maxLength={500}
                   />
+                  <p className="text-xs text-gray-400 mt-1 text-right">
+                    {review.length}/500 characters
+                  </p>
                 </div>
+
                 <button
                   onClick={handleSubmitRating}
                   disabled={rating === 0}
-                  className="w-full bg-gold-500 text-white px-4 py-3 rounded-lg hover:bg-gold-600 transition disabled:bg-gray-300 disabled:cursor-not-allowed"
+                  className="w-full bg-gradient-to-r from-yellow-400 to-orange-400 text-white px-6 py-3 rounded-lg font-semibold hover:from-yellow-500 hover:to-orange-500 transition disabled:from-gray-300 disabled:to-gray-300 disabled:cursor-not-allowed shadow-lg disabled:shadow-none flex items-center justify-center gap-2"
                 >
-                  Submit Rating
+                  <FaStar className="text-lg" />
+                  {rating === 0 ? 'Select a Rating' : 'Submit Rating'}
                 </button>
               </div>
             </div>
@@ -2360,7 +3092,15 @@ useEffect(() => {
                     Check-in: {showBookingDetails.displayCheckIn} • Check-out: {showBookingDetails.displayCheckOut}
                   </div>
                   <div className="flex items-center gap-1 text-yellow-500 text-xs">
-                    <FaStar /> {showBookingDetails.reviews}
+                    <FaStar /> {
+                      Array.isArray(showBookingDetails.reviews)
+                        ? `${showBookingDetails.reviews.length} reviews`
+                        : typeof showBookingDetails.reviews === 'number'
+                          ? (showBookingDetails.reviews.toFixed ? showBookingDetails.reviews.toFixed(1) : showBookingDetails.reviews)
+                          : (showBookingDetails.rating && showBookingDetails.rating.toFixed
+                              ? showBookingDetails.rating.toFixed(1)
+                              : 'No ratings')
+                    }
                   </div>
                 </div>
                 </div>
@@ -2450,214 +3190,217 @@ useEffect(() => {
           </div>
         )}
 
-        {/* Enhanced E-wallet */}
-        <div className="mt-10">
-          <div className="bg-gradient-to-r from-yellow-400 to-orange-400 rounded-xl shadow-lg p-6 text-white">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <FaWallet className="text-3xl" />
-            <div>
-              <div className="text-xl font-bold">E-wallet</div>
-                  <div className="text-sm opacity-90">Balance: ₱{eWalletBalance.toLocaleString()}</div>
-                  <div className="text-xs opacity-75">Pay easily and securely</div>
-                </div>
-              </div>
-              <div className="flex gap-2">
-              <button
-                  onClick={() => setShowEWallet(true)}
-                  className="bg-white/20 backdrop-blur text-white px-4 py-2 rounded-full hover:bg-white/30 transition"
-                >
-                  Top Up
-                </button>
-                <button
-                  onClick={() => handleEWalletPayment(2990)}
-                  className="bg-white text-yellow-600 px-4 py-2 rounded-full hover:bg-gray-100 transition font-semibold"
-              >
-                Pay Now
-              </button>
-              </div>
-            </div>
-          </div>
-        </div>
 
-        {/* E-wallet Modal */}
-        {showEWallet && (
-          <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-            <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-md relative">
+        {/* PayPal Add Funds Modal */}
+        {showPayPalTopUp && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md relative overflow-hidden">
               <button
-                onClick={() => setShowEWallet(false)}
-                className="absolute top-2 right-4 text-xl text-gray-400 hover:text-gold-500"
+                onClick={() => setShowPayPalTopUp(false)}
+                className="absolute top-4 right-4 text-2xl text-gray-400 hover:text-gray-600 z-10"
               >
                 ×
               </button>
-              <div className="text-center mb-6">
-                <FaWallet className="text-4xl text-yellow-400 mx-auto mb-2" />
-                <h3 className="text-xl font-bold">E-wallet</h3>
-                <p className="text-gray-500">Current Balance: ₱{eWalletBalance.toLocaleString()}</p>
+              
+              {/* Header */}
+              <div className="bg-gradient-to-r from-blue-600 to-blue-700 p-6 text-white">
+                <div className="flex items-center gap-3">
+                  <FaWallet className="text-3xl" />
+                  <div>
+                    <h3 className="text-2xl font-bold">Add Funds</h3>
+                    <p className="text-blue-50 text-sm mt-1">
+                      Current Balance: ${paypalBalance.toFixed(2)} USD
+                    </p>
+                  </div>
+                </div>
               </div>
-              <div className="space-y-4">
+
+              {/* Content */}
+              <div className="p-6">
+                <p className="text-gray-700 mb-4">Enter amount to add:</p>
+                
+                {/* Custom Amount Input */}
+                <div className="mb-6">
+                  <div className="relative">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-2xl font-bold text-gray-400">$</span>
+                    <input
+                      type="number"
+                      value={customAmount}
+                      onChange={(e) => setCustomAmount(e.target.value)}
+                      onKeyPress={(e) => {
+                        if (e.key === 'Enter') {
+                          handleCustomAmountSubmit();
+                        }
+                      }}
+                      placeholder="0.00"
+                      min="0.01"
+                      step="0.01"
+                      className="w-full pl-12 pr-16 py-4 text-2xl font-bold border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition"
+                    />
+                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-lg font-semibold text-gray-400">USD</span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">Minimum: $0.01 • Maximum: $10,000</p>
+                </div>
+
+                {/* Quick Amount Suggestions */}
+                <div className="mb-4">
+                  <p className="text-sm text-gray-600 mb-2">Quick amounts:</p>
+                  <div className="grid grid-cols-4 gap-2">
+                    <button
+                      onClick={() => setCustomAmount('10')}
+                      className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition"
+                    >
+                      $10
+                    </button>
+                    <button
+                      onClick={() => setCustomAmount('25')}
+                      className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition"
+                    >
+                      $25
+                    </button>
+                    <button
+                      onClick={() => setCustomAmount('50')}
+                      className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition"
+                    >
+                      $50
+                    </button>
+                    <button
+                      onClick={() => setCustomAmount('100')}
+                      className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition"
+                    >
+                      $100
+                    </button>
+                  </div>
+                </div>
+
+                {/* Continue Button */}
                 <button
-                  onClick={() => setEWalletBalance(prev => prev + 1000)}
-                  className="w-full bg-yellow-400 text-white px-4 py-3 rounded-lg hover:bg-yellow-500 transition"
+                  onClick={handleCustomAmountSubmit}
+                  disabled={!customAmount || parseFloat(customAmount) <= 0}
+                  className="w-full bg-gradient-to-r from-blue-600 to-blue-700 text-white px-6 py-4 rounded-lg hover:from-blue-700 hover:to-blue-800 transition font-bold text-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
-                  Add ₱1,000
-                </button>
-                <button
-                  onClick={() => setEWalletBalance(prev => prev + 5000)}
-                  className="w-full bg-yellow-400 text-white px-4 py-3 rounded-lg hover:bg-yellow-500 transition"
-                >
-                  Add ₱5,000
-                </button>
-                <button
-                  onClick={() => setEWalletBalance(prev => prev + 10000)}
-                  className="w-full bg-yellow-400 text-white px-4 py-3 rounded-lg hover:bg-yellow-500 transition"
-                >
-                  Add ₱10,000
+                  <FaCreditCard />
+                  Continue to PayPal
                 </button>
               </div>
             </div>
           </div>
         )}
 
-        {/* Enhanced Account Settings */}
-        <div className="mt-10">
-          <div className="bg-white rounded-xl shadow-lg p-6">
-            <div className="flex items-center justify-between mb-6">
-              <div className="flex items-center gap-3">
-                <FaCog className="text-2xl text-gold-500" />
-                <div>
-                  <h3 className="text-xl font-bold">Account Settings</h3>
-                  <p className="text-sm text-gray-500">Manage your profile, bookings, and preferences</p>
+        {/* PayPal Cash-In Payment Modal */}
+        {showPayPalCashIn && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md relative overflow-hidden">
+              {/* Header */}
+              <div className="bg-gradient-to-r from-blue-600 to-blue-700 p-6 text-white">
+                <button
+                  onClick={() => setShowPayPalCashIn(false)}
+                  className="absolute top-4 right-4 text-white hover:text-gray-200 text-2xl"
+                >
+                  ×
+                </button>
+                <div className="flex items-center gap-3">
+                  <FaWallet className="text-3xl" />
+                  <div>
+                    <h3 className="text-2xl font-bold">Cash In via PayPal</h3>
+                    <p className="text-blue-50 text-sm mt-1">
+                      Add ${cashInAmount} USD to your balance
+                    </p>
+                  </div>
                 </div>
               </div>
-              <button
-                onClick={() => setShowAccountSettings(!showAccountSettings)}
-                className="text-gold-500 hover:text-gold-700 text-sm underline"
-              >
-                {showAccountSettings ? "Hide" : "Show"} Settings
-              </button>
+
+              {/* Payment Info */}
+              <div className="p-6 bg-gray-50 border-b">
+                <div className="flex justify-between items-center mb-4">
+                  <span className="text-gray-600">Cash-In Amount:</span>
+                  <span className="text-2xl font-bold text-blue-600">${cashInAmount} USD</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-600">Current Balance:</span>
+                  <span className="text-lg font-semibold text-gray-900">${paypalBalance.toFixed(2)} USD</span>
+                </div>
+                <div className="mt-2 pt-2 border-t border-gray-200 flex justify-between items-center">
+                  <span className="text-gray-900 font-semibold">New Balance:</span>
+                  <span className="text-lg font-bold text-green-600">${(paypalBalance + cashInAmount).toFixed(2)} USD</span>
+                </div>
+              </div>
+
+              {/* PayPal Button Container */}
+              <div className="p-6">
+                <div className="mb-4 text-center">
+                  <p className="text-sm text-gray-600">
+                    Complete payment with PayPal or Card
+                  </p>
+                </div>
+                <div id="paypal-cashin-container" className="min-h-[150px] flex items-center justify-center">
+                  <div className="text-gray-500 text-center">
+                    <FaSpinner className="animate-spin text-3xl mx-auto mb-2 text-blue-600" />
+                    <p>Loading PayPal...</p>
+                  </div>
+                </div>
+              </div>
             </div>
-
-            {showAccountSettings && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                {/* Profile Section */}
-                <div className="bg-gray-50 rounded-lg p-4">
-                  <div className="flex items-center gap-2 mb-3">
-                    <FaUserCircle className="text-gold-500" />
-                    <span className="font-semibold">Profile</span>
-                  </div>
-                  <div className="space-y-2 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Name:</span>
-                      <span className="font-medium">{profile.name}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Email:</span>
-                      <span className="font-medium">{profile.email}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Phone:</span>
-                      <span className="font-medium">{profile.phone}</span>
-                    </div>
-                    <button
-                      onClick={handleProfileEdit}
-                      className="w-full mt-3 bg-gold-500 text-white px-3 py-2 rounded-lg text-xs hover:bg-gold-600 transition"
-                    >
-                      Edit Profile
-                    </button>
-                  </div>
-                </div>
-
-                {/* Bookings Section */}
-                <div className="bg-gray-50 rounded-lg p-4">
-                  <div className="flex items-center gap-2 mb-3">
-                    <FaHistory className="text-blue-500" />
-                    <span className="font-semibold">Bookings</span>
-                  </div>
-                  <div className="space-y-2 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Total:</span>
-                      <span className="font-medium">{bookings.length}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Upcoming:</span>
-                      <span className="font-medium text-green-600">
-                        {bookings.filter(b => b.status === "Upcoming").length}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Completed:</span>
-                      <span className="font-medium text-gray-600">
-                        {bookings.filter(b => b.status === "Completed").length}
-                      </span>
-                    </div>
-                    <button
-                    onClick={() => setShowAllBookings(!showAllBookings)}
-                    className="bg-blue-500 text-white px-4 py-2 rounded w-full mt-3 hover:bg-blue-600 transition"
-                  >
-                    {showAllBookings ? "Hide Bookings" : "View All Bookings"}
-                  </button>
-                    {showAllBookings && (
-                  <div className="mt-6">
-                    <h2 className="text-lg font-semibold mb-3">
-                      You have {bookings.length} {bookings.length === 1 ? "booking" : "bookings"}
-                    </h2>
-                    {bookings.length > 0 ? (
-                      <ul className="space-y-3">
-                        {bookings.map((b) => (
-                          <li key={b.id} className="border p-3 rounded-md shadow-sm">
-                            <div className="font-semibold">{b.title || "Untitled"}</div>
-                            <div className="text-sm text-gray-600">{b.location}</div>
-                            <div className="text-sm text-gray-500">
-                              {b.displayCheckIn} – {b.displayCheckOut} ({b.status})
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="text-gray-500">No bookings found.</p>
-                    )}
-                  </div>
-                )}
-
-                  </div>
-                </div>
-
-                {/* Wishlist Section */}
-                {/* <div className="bg-gray-50 rounded-lg p-4">
-                  <div className="flex items-center gap-2 mb-3">
-                    <FaBookmark className="text-gold-500" />
-                    <span className="font-semibold">Wishlist</span>
-                  </div>
-                  <div className="space-y-2 text-sm">
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Saved:</span>
-                      <span className="font-medium">{favorites.length}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Categories:</span>
-                      <span className="font-medium">
-                        {[...new Set(favorites.map(f => f.category))].length}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Locations:</span>
-                      <span className="font-medium">
-                        {[...new Set(favorites.map(f => f.location))].length}
-                      </span>
-                    </div>
-                    <button
-                      onClick={() => setShowWishlist(!showWishlist)}
-                      className="w-full mt-3 bg-gold-500 text-white px-3 py-2 rounded-lg text-xs hover:bg-gold-600 transition"
-                    >
-                      {showWishlist ? "Hide" : "Show"} Wishlist
-                    </button>
-                  </div>
-                </div> */}
-              </div>
-            )}
           </div>
-        </div>
+        )}
+
+        {/* PayPal Top-Up Payment Modal */}
+        {showPayPalTopUpPayment && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md relative overflow-hidden">
+              {/* Header */}
+              <div className="bg-gradient-to-r from-blue-600 to-blue-700 p-6 text-white">
+                <button
+                  onClick={() => setShowPayPalTopUpPayment(false)}
+                  className="absolute top-4 right-4 text-white hover:text-gray-200 text-2xl"
+                >
+                  ×
+                </button>
+                <div className="flex items-center gap-3">
+                  <FaCreditCard className="text-3xl" />
+                  <div>
+                    <h3 className="text-2xl font-bold">Top Up PayPal</h3>
+                    <p className="text-blue-50 text-sm mt-1">
+                      Add ${topUpAmount} USD to your account
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Payment Info */}
+              <div className="p-6 bg-gray-50 border-b">
+                <div className="flex justify-between items-center mb-4">
+                  <span className="text-gray-600">Top-Up Amount:</span>
+                  <span className="text-2xl font-bold text-blue-600">${topUpAmount} USD</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-600">Current Balance:</span>
+                  <span className="text-lg font-semibold text-gray-900">${paypalBalance.toFixed(2)} USD</span>
+                </div>
+                <div className="mt-2 pt-2 border-t border-gray-200 flex justify-between items-center">
+                  <span className="text-gray-900 font-semibold">New Balance:</span>
+                  <span className="text-lg font-bold text-green-600">${(paypalBalance + topUpAmount).toFixed(2)} USD</span>
+                </div>
+              </div>
+
+              {/* PayPal Button Container */}
+              <div className="p-6">
+                <div className="mb-4 text-center">
+                  <p className="text-sm text-gray-600">
+                    Complete payment with PayPal Sandbox
+                  </p>
+                </div>
+                <div id="paypal-topup-container" className="min-h-[150px] flex items-center justify-center">
+                  <div className="text-gray-500 text-center">
+                    <FaSpinner className="animate-spin text-3xl mx-auto mb-2 text-blue-600" />
+                    <p>Loading PayPal...</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
 
         {/* Enhanced Suggestions & Recommendations */}
         <div className="mt-10">
@@ -2679,29 +3422,37 @@ useEffect(() => {
               </div>
             )}
             {getEnhancedSuggestions().map((s) => (
-              <div key={s.id} className="bg-white rounded-xl shadow hover:shadow-lg transition p-4 flex flex-col items-center group">
-                <div className="relative">
-                <img src={s.img} alt={s.title} className="w-24 h-24 rounded-lg object-cover mb-2" />
+              <div key={s.id} className="bg-white rounded-xl shadow hover:shadow-lg transition p-4 flex flex-col group">
+                <div className="relative mb-3">
+                  <img src={s.img} alt={s.title} className="w-full h-48 rounded-lg object-cover" />
                   <button
                     onClick={() => toggleFavorite(s)}
-                    className="absolute top-1 right-1 p-1 rounded-full bg-white/80 hover:bg-white shadow"
+                    className="absolute top-2 right-2 p-2 rounded-full bg-white/80 hover:bg-white shadow"
                   >
                     <FaHeart className={isFavorited(s.id) ? "text-gold-600" : "text-gray-400"} />
                   </button>
                 </div>
-                <div className="font-bold text-center">{s.title}</div>
-                <div className="text-xs text-gray-400 mb-1">{s.category} • {s.location}</div>
-                <div className="flex items-center gap-1 text-yellow-500 mb-2">
-                  <FaStar /> {s.reviews}
+                <div className="font-bold text-center text-lg">{s.title}</div>
+                <div className="text-xs text-gray-400 mb-2 text-center">{s.category} • {s.location}</div>
+                <div className="flex items-center gap-1 text-yellow-500 mb-2 justify-center">
+                  <FaStar /> {renderReviewsRating(s.reviews)}
                 </div>
-                <div className="text-xs text-gray-500 mb-2 text-center">₱{s.pricePerNight?.toLocaleString?.()}/night</div>
-                <div className="text-xs text-gray-500 mb-2 text-center">Amenities: {(s.amenities || []).slice(0, 2).join(", ")}</div>
-                <button
-                  onClick={() => handleAddFavorite(s)}
-                  className="text-gold-500 hover:text-gold-700 text-xs flex items-center gap-1 group-hover:bg-gold-50 px-3 py-1 rounded-full transition"
-                >
-                  <FaHeart /> Add to Favorites
-                </button>
+                <div className="text-sm text-gray-700 font-semibold mb-3 text-center">₱{s.pricePerNight?.toLocaleString?.()}/night</div>
+                <div className="text-xs text-gray-500 mb-3 text-center">Amenities: {(s.amenities || []).slice(0, 2).join(", ")}</div>
+                <div className="mt-auto grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => handleBookListing(s)}
+                    className="bg-gold-500 hover:bg-gold-600 text-white px-4 py-2 rounded-lg shadow-md transition text-sm font-semibold"
+                  >
+                    Book Now
+                  </button>
+                  <button
+                    onClick={() => handleMessageHost(s)}
+                    className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg shadow-md transition flex items-center justify-center gap-1 text-sm font-semibold"
+                  >
+                    <FaEnvelope className="text-xs" /> Message
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -2879,7 +3630,7 @@ useEffect(() => {
                   <div className="relative overflow-hidden rounded-xl aspect-[4/3] bg-gray-100 mb-4">
                     <img src={selectedListing.img} alt={selectedListing.title} className="h-full w-full object-cover" />
                     <div className="absolute bottom-3 left-3 flex items-center gap-1 text-white bg-black/50 px-2 py-1 rounded-full text-xs">
-                      <FaStar className="text-yellow-300" /> {selectedListing.reviews}
+                      <FaStar className="text-yellow-300" /> {renderReviewsRating(selectedListing.reviews)}
                     </div>
                   </div>
                   {(selectedListing?.coordinates?.lat && selectedListing?.coordinates?.lng) || (selectedListing?.location || selectedListing?.title) ? (
@@ -2916,6 +3667,34 @@ useEffect(() => {
 
                 {/* Right side - Booking form */}
                 <div className="space-y-4">
+                  {/* Booked dates warning */}
+                  {getBookedDatesForListing(selectedListing.id).length > 0 && (
+                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm">
+                      <div className="flex items-start gap-2">
+                        <FaExclamationTriangle className="text-yellow-600 mt-0.5 flex-shrink-0" />
+                        <div className="flex-1">
+                          <div className="font-semibold text-yellow-800 mb-1">Some dates are unavailable</div>
+                          <div className="text-yellow-700 text-xs mb-2">
+                            This property has existing bookings. Avoid these date ranges:
+                          </div>
+                          <div className="space-y-1">
+                            {getBookedRanges(selectedListing.id).map((range, idx) => (
+                              <div key={idx} className="flex items-center gap-2 text-xs text-yellow-800">
+                                <FaCalendarAlt className="text-yellow-600" />
+                                <span className="font-medium">
+                                  {range.displayCheckIn || new Date(range.checkIn).toLocaleDateString()} - {range.displayCheckOut || new Date(range.checkOut).toLocaleDateString()}
+                                </span>
+                                <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded-full text-xs font-semibold">
+                                  Booked
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   <div>
                     <label className="block text-sm font-semibold mb-2">Check-in Date</label>
                     <input
@@ -2988,17 +3767,11 @@ useEffect(() => {
                       Cancel
                     </button>
                     <button
-                      onClick={() => handlePayPalPayment(calculateBookingTotal() + Math.round(calculateBookingTotal() * 0.1))}
-                      className="flex-1 bg-blue-500 text-white px-4 py-3 rounded-lg hover:bg-blue-600 transition font-semibold flex items-center gap-2"
-                    >
-                      <FaCreditCard />
-                      Pay with PayPal
-                    </button>
-                    <button
                       onClick={handleConfirmBooking}
-                      className="flex-1 bg-gold-500 text-white px-4 py-3 rounded-lg hover:bg-gold-600 transition font-semibold"
+                      className="flex-1 bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-3 rounded-lg hover:from-blue-700 hover:to-blue-800 transition font-semibold flex items-center justify-center gap-2 shadow-md"
                     >
-                      Pay with E-wallet
+                      <FaCreditCard className="text-lg" />
+                      Pay with PayPal
                     </button>
                   </div>
                 </div>
@@ -3019,10 +3792,10 @@ useEffect(() => {
               </button>
               
               <div className="mb-6">
-                <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <FaThumbsUp className="text-2xl text-green-500" />
+                <div className="w-16 h-16 bg-gold-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <FaThumbsUp className="text-2xl text-gold-500" />
                 </div>
-                <h3 className="text-2xl font-bold text-green-600 mb-2">Booking Confirmed!</h3>
+                <h3 className="text-2xl font-bold text-gold-600 mb-2">Booking Confirmed!</h3>
                 <p className="text-gray-500">Your booking has been successfully processed.</p>
               </div>
 
@@ -3211,6 +3984,240 @@ useEffect(() => {
             onSelectChat={handleSelectChat}
             userType="guest"
           />
+        )}
+
+        {/* Transaction History Modal */}
+        {showTransactionHistory && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col">
+              {/* Header */}
+              <div className="bg-gradient-to-r from-blue-600 to-blue-700 p-6 text-white">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <FaHistory className="text-3xl" />
+                    <div>
+                      <h3 className="text-2xl font-bold">Transaction History</h3>
+                      <p className="text-blue-50 text-sm mt-1">{transactions.length} transactions</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowTransactionHistory(false)}
+                    className="text-white hover:text-gray-200 text-2xl"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+
+              {/* Transaction List */}
+              <div className="flex-1 overflow-y-auto p-6">
+                {transactions.length === 0 ? (
+                  <div className="text-center py-12">
+                    <FaHistory className="text-6xl text-gray-300 mx-auto mb-4" />
+                    <p className="text-gray-500 text-lg">No transactions yet</p>
+                    <p className="text-gray-400 text-sm mt-2">Your transaction history will appear here</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {transactions.map((transaction, index) => (
+                      <div
+                        key={transaction.id || index}
+                        className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md transition"
+                      >
+                        <div className="flex items-start justify-between">
+                          <div className="flex items-start gap-4 flex-1">
+                            {/* Icon */}
+                            <div className={`p-3 rounded-full ${
+                              transaction.type === 'Cash-In'
+                                ? 'bg-green-100 text-green-600'
+                                : transaction.type === 'Booking Payment'
+                                ? 'bg-blue-100 text-blue-600'
+                                : transaction.type === 'Refund'
+                                ? 'bg-orange-100 text-orange-600'
+                                : 'bg-gray-100 text-gray-600'
+                            }`}>
+                              {transaction.type === 'Cash-In' ? (
+                                <FaWallet className="text-xl" />
+                              ) : transaction.type === 'Booking Payment' ? (
+                                <FaCreditCard className="text-xl" />
+                              ) : transaction.type === 'Refund' ? (
+                                <FaHistory className="text-xl" />
+                              ) : (
+                                <FaHistory className="text-xl" />
+                              )}
+                            </div>
+
+                            {/* Details */}
+                            <div className="flex-1">
+                              <div className="flex items-start justify-between mb-2">
+                                <div>
+                                  <h4 className="font-bold text-gray-900">{transaction.type}</h4>
+                                  <p className="text-sm text-gray-600">{transaction.description}</p>
+                                  {transaction.listingTitle && (
+                                    <p className="text-xs text-gray-500 mt-1">📍 {transaction.listingTitle}</p>
+                                  )}
+                                </div>
+                                <div className="text-right">
+                                  <div className={`text-xl font-bold ${
+                                    transaction.amount > 0 ? 'text-green-600' : 'text-red-600'
+                                  }`}>
+                                    {transaction.amount > 0 ? '+' : ''}${Math.abs(transaction.amount).toFixed(2)} USD
+                                  </div>
+                                  {transaction.phpAmount && (
+                                    <div className="text-sm text-gray-500">≈ ₱{transaction.phpAmount.toLocaleString()}</div>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Transaction Info */}
+                              <div className="grid grid-cols-2 gap-3 mt-3 text-xs">
+                                <div className="bg-gray-50 p-2 rounded">
+                                  <span className="text-gray-500">Transaction ID:</span>
+                                  <p className="font-mono font-semibold text-gray-700 truncate">{transaction.transactionId}</p>
+                                </div>
+                                <div className="bg-gray-50 p-2 rounded">
+                                  <span className="text-gray-500">Date:</span>
+                                  <p className="font-semibold text-gray-700">
+                                    {new Date(transaction.createdAt).toLocaleDateString('en-US', {
+                                      month: 'short',
+                                      day: 'numeric',
+                                      year: 'numeric',
+                                      hour: '2-digit',
+                                      minute: '2-digit'
+                                    })}
+                                  </p>
+                                </div>
+                                {transaction.checkIn && (
+                                  <div className="bg-gray-50 p-2 rounded">
+                                    <span className="text-gray-500">Check-in:</span>
+                                    <p className="font-semibold text-gray-700">{transaction.checkIn}</p>
+                                  </div>
+                                )}
+                                {transaction.checkOut && (
+                                  <div className="bg-gray-50 p-2 rounded">
+                                    <span className="text-gray-500">Check-out:</span>
+                                    <p className="font-semibold text-gray-700">{transaction.checkOut}</p>
+                                  </div>
+                                )}
+                                <div className="bg-gray-50 p-2 rounded">
+                                  <span className="text-gray-500">Balance After:</span>
+                                  <p className="font-semibold text-gray-700">${transaction.balanceAfter.toFixed(2)}</p>
+                                </div>
+                                <div className="bg-gray-50 p-2 rounded">
+                                  <span className="text-gray-500">Status:</span>
+                                  <p className={`font-semibold inline-flex items-center ${
+                                    transaction.status === 'Completed' ? 'text-green-600' : 'text-yellow-600'
+                                  }`}>
+                                    {transaction.status}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="p-6 bg-gray-50 border-t">
+                <button
+                  onClick={() => setShowTransactionHistory(false)}
+                  className="w-full bg-gradient-to-r from-blue-600 to-blue-700 text-white px-6 py-3 rounded-lg hover:from-blue-700 hover:to-blue-800 transition font-semibold"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Custom Alert Modal */}
+        {showCustomAlert && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[9999] p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md relative overflow-hidden animate-fadeIn">
+              {/* Header with Icon */}
+              <div className={`p-6 ${
+                customAlertData.type === 'success' 
+                  ? 'bg-gradient-to-r from-gold-500 to-gold-600' 
+                  : customAlertData.type === 'error'
+                  ? 'bg-gradient-to-r from-red-500 to-red-600'
+                  : 'bg-gradient-to-r from-blue-500 to-blue-600'
+              } text-white`}>
+                <div className="flex items-center gap-4">
+                  <div className="bg-white bg-opacity-20 p-3 rounded-full">
+                    {customAlertData.type === 'success' ? (
+                      <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : customAlertData.type === 'error' ? (
+                      <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    ) : (
+                      <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    )}
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="text-2xl font-bold">{customAlertData.title}</h3>
+                    {customAlertData.message && (
+                      <p className="text-white text-opacity-90 mt-1">{customAlertData.message}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Details */}
+              {customAlertData.details && customAlertData.details.length > 0 && (
+                <div className="p-6 bg-gray-50">
+                  <div className="space-y-3">
+                    {customAlertData.details.map((detail, index) => (
+                      <div key={index} className="flex items-start gap-3 bg-white p-3 rounded-lg shadow-sm">
+                        <div className={`mt-0.5 ${
+                          customAlertData.type === 'success' 
+                            ? 'text-gold-600' 
+                            : customAlertData.type === 'error'
+                            ? 'text-red-600'
+                            : 'text-blue-600'
+                        }`}>
+                          {customAlertData.type === 'success' ? (
+                            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                            </svg>
+                          ) : (
+                            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                            </svg>
+                          )}
+                        </div>
+                        <p className="text-gray-700 flex-1 font-medium">{detail}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Button */}
+              <div className="p-6 bg-white">
+                <button
+                  onClick={() => setShowCustomAlert(false)}
+                  className={`w-full py-3 px-6 rounded-lg font-bold text-white transition shadow-lg ${
+                    customAlertData.type === 'success'
+                      ? 'bg-gradient-to-r from-gold-500 to-gold-600 hover:from-gold-600 hover:to-gold-700'
+                      : customAlertData.type === 'error'
+                      ? 'bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700'
+                      : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700'
+                  }`}
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
         )}
        
       </div>

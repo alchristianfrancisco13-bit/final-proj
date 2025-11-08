@@ -29,7 +29,9 @@ import {
   FaPercentage, FaQrcode, FaMobile, FaDesktop, FaTablet
 } from "react-icons/fa";
 import Messages from "./components/Messages";
+import { approveBookingTransaction } from "./utils/transactions";
 import ChatList from "./components/ChatList";
+
 
 function HostPage({ onLogout }) {
 
@@ -47,6 +49,7 @@ useEffect(() => {
   
   const [listings, setListings] = useState([]);
   const [bookings, setBookings] = useState([]);
+  const pendingApprovals = bookings.filter(b => b.status === "PendingApproval");
   const [currentDate, setCurrentDate] = useState(new Date());
   const [showAllBookings, setShowAllBookings] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
@@ -54,6 +57,7 @@ useEffect(() => {
   const [selectedGuest, setSelectedGuest] = useState(null);
   const [selectedProperty, setSelectedProperty] = useState(null);
   const [recentChats, setRecentChats] = useState([]);
+  const [showNotifications, setShowNotifications] = useState(false);
 
   // Real-time listings, bookings, and dashboard updates
   useEffect(() => {
@@ -608,8 +612,9 @@ useEffect(() => {
   // Messaging functions
   const handleMessageGuest = (booking) => {
     setSelectedGuest({
-      uid: booking.guestId,
-      displayName: booking.guestName || 'Guest',
+      uid: booking.guestId || 'guest_' + booking.id,
+      displayName: booking.guestName || booking.guestEmail?.split('@')[0] || 'Guest',
+      name: booking.guestName || 'Guest',
       email: booking.guestEmail || 'guest@stayhub.com'
     });
     
@@ -629,7 +634,11 @@ useEffect(() => {
 
   // Handle chat selection from chat list
   const handleSelectChat = (otherUser, propertyInfo = null) => {
-    setSelectedGuest(otherUser);
+    // Ensure displayName is set for Messages component compatibility
+    setSelectedGuest({
+      ...otherUser,
+      displayName: otherUser.displayName || otherUser.name || otherUser.email?.split('@')[0] || 'User'
+    });
     setSelectedProperty(propertyInfo);
     setShowChatList(false);
     setShowMessages(true);
@@ -647,31 +656,74 @@ useEffect(() => {
       const chatsRef = collection(db, 'chats');
       const qChats = query(
         chatsRef,
-        where('participants', 'array-contains', auth.currentUser.uid),
-        orderBy('updatedAt', 'desc')
+        where('participants', 'array-contains', auth.currentUser.uid)
       );
       const unsub = onSnapshot(qChats, (snapshot) => {
-        const items = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        const items = snapshot.docs.map((d) => ({ 
+          id: d.id, 
+          ...d.data(),
+          lastMessageTime: d.data().lastMessageTime?.toDate?.() || new Date()
+        }))
+        .sort((a, b) => b.lastMessageTime - a.lastMessageTime) // Sort in memory instead
+        .slice(0, 5); // Only keep 5 most recent
         setRecentChats(items);
       });
       return () => unsub();
     } catch (e) {
-      // ignore
+      console.error('Error subscribing to chats:', e);
     }
   }, [auth.currentUser?.uid]);
 
-  // 6. Dashboard Today & Upcoming
-  const updateDashboard = () => {
-    const todayBookings = listings.filter(l => 
-      new Date(l.createdAt).toDateString() === new Date().toDateString()
+  // Recalculate dashboard stats when data changes
+  useEffect(() => {
+    if (bookings.length > 0 || listings.length > 0) {
+      calculateDashboardStats();
+    }
+  }, [bookings, listings]);
+
+  // Calculate realistic dashboard stats from actual data
+  const calculateDashboardStats = () => {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    // Today's bookings (check-ins today)
+    const todayBookings = bookings.filter(b => {
+      const checkInDate = new Date(b.checkIn);
+      return checkInDate >= today && checkInDate < tomorrow && b.status !== 'Cancelled';
+    }).length;
+
+    // Upcoming bookings (check-in date in the future)
+    const upcomingBookings = bookings.filter(b => {
+      const checkInDate = new Date(b.checkIn);
+      return checkInDate >= tomorrow && (b.status === 'Upcoming' || b.status === 'PendingApproval');
+    }).length;
+
+    // Calculate occupancy rate
+    const totalBookings = bookings.length;
+    const completedBookings = bookings.filter(b => b.status === 'Completed').length;
+    const occupancyRate = totalBookings > 0 ? Math.round((completedBookings / totalBookings) * 100) : 0;
+
+    // Calculate average rating from all listings
+    const ratingsSum = listings.reduce((sum, l) => sum + (l.rating || 0), 0);
+    const averageRating = listings.length > 0 ? (ratingsSum / listings.length).toFixed(1) : '0.0';
+
+    // Calculate response rate (based on bookings)
+    const totalRequests = bookings.length;
+    const respondedRequests = bookings.filter(b => 
+      b.status !== 'PendingApproval'
     ).length;
-    
-    const upcomingBookings = Math.floor(Math.random() * 10) + 3;
-    
+    const responseRate = totalRequests > 0 ? Math.round((respondedRequests / totalRequests) * 100) : 100;
+
     setDashboard(prev => ({
       ...prev,
       today: todayBookings,
-      upcoming: upcomingBookings
+      upcoming: upcomingBookings,
+      occupancyRate: occupancyRate,
+      averageRating: averageRating,
+      responseRate: responseRate,
+      responseTime: responseRate >= 90 ? '<1hr' : '<2hrs'
     }));
   };
 
@@ -680,6 +732,52 @@ useEffect(() => {
     alert("Payment Methods Configured:\n" + 
       paymentMethods.map(p => `• ${p.type}: ${p.account} (${p.status})`).join('\n'));
   };
+
+  // Approve or decline booking
+  const handleApproveBooking = async (booking) => {
+    try {
+      await approveBookingTransaction(db, booking.id);
+      alert("Booking approved");
+    } catch (e) {
+      console.error("Approve booking failed:", e);
+      alert("Failed to approve booking. Please try again.");
+    }
+  };
+
+  const handleDeclineBooking = async (booking) => {
+    try {
+      await updateDoc(doc(db, "bookings", booking.id), {
+        status: "Declined",
+        updatedAt: new Date().toISOString()
+      });
+      alert("Booking declined");
+    } catch (e) {
+      console.error("Decline booking failed:", e);
+      alert("Failed to decline booking. Please try again.");
+    }
+  };
+
+  // Auto-expire pending bookings after 24h
+  useEffect(() => {
+    const expire = async () => {
+      const now = Date.now();
+      const toExpire = pendingApprovals.filter(b => {
+        const deadline = new Date(b.cancelDeadline || 0).getTime();
+        return deadline && now > deadline;
+      });
+      for (const b of toExpire) {
+        try {
+          await updateDoc(doc(db, 'bookings', b.id), {
+            status: 'Expired',
+            updatedAt: new Date().toISOString()
+          });
+        } catch (e) {
+          // ignore per item
+        }
+      }
+    };
+    if (pendingApprovals.length) expire();
+  }, [pendingApprovals]);
 
   // 8. Account Settings (Profile, Bookings, Coupon)
   // Edit Profile Modal states
@@ -910,9 +1008,16 @@ useEffect(() => {
 
             {/* User Profile and Actions */}
           <div className="flex items-center gap-4">
-              <button className="relative p-2 rounded-full hover:bg-gray-100 transition">
+              <button 
+                onClick={() => setShowNotifications(!showNotifications)}
+                className="relative p-2 rounded-full hover:bg-gray-100 transition"
+              >
                 <FaBell className="text-gray-600" />
-                <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full"></span>
+                {pendingApprovals.length > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[20px] h-5 bg-red-500 text-white text-xs rounded-full flex items-center justify-center px-1">
+                    {pendingApprovals.length}
+                  </span>
+                )}
               </button>
               <button onClick={() => setShowAccountSettings(true)} className="p-2 rounded-full hover:bg-gray-100 transition">
                 <FaSettings className="text-gray-600" />
@@ -948,6 +1053,29 @@ useEffect(() => {
         {/* Airbnb-style Dashboard Overview */}
         {activeTab === "overview" && (
           <div className="space-y-6">
+            {/* Pending Approvals */}
+            {pendingApprovals.length > 0 && (
+              <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-yellow-500">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-lg font-semibold text-gray-900">Pending Booking Approvals</h3>
+                  <span className="text-sm text-gray-500">{pendingApprovals.length} pending</span>
+                </div>
+                <div className="space-y-3">
+                  {pendingApprovals.slice(0,5).map((b) => (
+                    <div key={b.id} className="flex items-center justify-between p-3 bg-yellow-50 rounded-lg">
+                      <div>
+                        <div className="font-medium">{b.title}</div>
+                        <div className="text-xs text-gray-600">{b.checkIn} → {b.checkOut} • ₱{(b.total||0).toLocaleString()}</div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button onClick={() => handleDeclineBooking(b)} className="px-3 py-1 rounded bg-red-100 text-red-700 text-sm hover:bg-red-200">Decline</button>
+                        <button onClick={() => handleApproveBooking(b)} className="px-3 py-1 rounded bg-green-600 text-white text-sm hover:bg-green-700">Approve</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {/* Key Metrics */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
               <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-green-500">
@@ -2520,6 +2648,115 @@ useEffect(() => {
           currentUser={auth.currentUser}
           onSelectChat={handleSelectChat}
           userType="host"
+        />
+      )}
+
+      {/* Notifications Dropdown */}
+      {showNotifications && (
+        <div className="fixed top-16 right-4 w-96 bg-white rounded-xl shadow-2xl border border-gray-200 z-50 max-h-[500px] overflow-hidden flex flex-col">
+          <div className="p-4 border-b bg-gradient-to-r from-blue-50 to-indigo-50">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <FaBell className="text-blue-600" />
+                <h3 className="font-bold text-gray-900">Notifications</h3>
+              </div>
+              <button 
+                onClick={() => setShowNotifications(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                ×
+              </button>
+            </div>
+            {pendingApprovals.length > 0 && (
+              <p className="text-sm text-gray-600 mt-1">
+                {pendingApprovals.length} pending booking{pendingApprovals.length !== 1 ? 's' : ''} require your attention
+              </p>
+            )}
+          </div>
+          
+          <div className="flex-1 overflow-y-auto">
+            {pendingApprovals.length === 0 ? (
+              <div className="p-8 text-center text-gray-500">
+                <FaBell className="mx-auto text-4xl text-gray-300 mb-3" />
+                <p className="font-medium">No pending approvals</p>
+                <p className="text-sm mt-1">You're all caught up!</p>
+              </div>
+            ) : (
+              <div className="divide-y">
+                {pendingApprovals.map((booking) => (
+                  <div key={booking.id} className="p-4 hover:bg-gray-50 transition">
+                    <div className="flex gap-3">
+                      <img 
+                        src={booking.img || "https://images.unsplash.com/photo-1566073771259-6a8506099945?w=100"} 
+                        alt={booking.title}
+                        className="w-16 h-16 rounded-lg object-cover"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1">
+                            <h4 className="font-semibold text-gray-900 truncate">
+                              {booking.title}
+                            </h4>
+                            <p className="text-sm text-gray-600 mt-1">
+                              {booking.guestName || 'Guest'}
+                            </p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              {booking.displayCheckIn} - {booking.displayCheckOut}
+                            </p>
+                            <p className="text-sm font-medium text-blue-600 mt-1">
+                              ₱{booking.total?.toLocaleString()}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex gap-2 mt-3">
+                          <button
+                            onClick={() => {
+                              handleApproveBooking(booking);
+                              setShowNotifications(false);
+                            }}
+                            className="flex-1 bg-green-500 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-green-600 transition"
+                          >
+                            Approve
+                          </button>
+                          <button
+                            onClick={() => {
+                              handleDeclineBooking(booking);
+                              setShowNotifications(false);
+                            }}
+                            className="flex-1 bg-red-500 text-white px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-red-600 transition"
+                          >
+                            Decline
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          
+          {pendingApprovals.length > 0 && (
+            <div className="p-3 border-t bg-gray-50">
+              <button
+                onClick={() => {
+                  setActiveTab("bookings");
+                  setShowNotifications(false);
+                }}
+                className="w-full text-center text-sm text-blue-600 hover:text-blue-700 font-medium"
+              >
+                View All Bookings
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Click outside to close notifications */}
+      {showNotifications && (
+        <div 
+          className="fixed inset-0 z-40"
+          onClick={() => setShowNotifications(false)}
         />
       )}
     </div>

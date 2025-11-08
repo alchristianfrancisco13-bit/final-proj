@@ -1,10 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { 
   collection, 
   addDoc, 
   query, 
   where, 
-  orderBy, 
   onSnapshot, 
   serverTimestamp,
   doc,
@@ -19,6 +18,7 @@ export default function Messages({ isOpen, onClose, currentUser, otherUser, user
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const messagesEndRef = useRef(null);
 
   // Create a unique chat ID based on user IDs and property ID
   const getChatId = () => {
@@ -116,31 +116,56 @@ export default function Messages({ isOpen, onClose, currentUser, otherUser, user
     }
   };
 
+  // Auto-scroll to bottom when messages change
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
   // Listen to messages
   useEffect(() => {
     if (!isOpen || !currentUser || !otherUser) return;
 
     const chatId = getChatId();
-    if (!chatId) return;
+    if (!chatId) {
+      console.warn('No chatId generated');
+      return;
+    }
+
+    console.log('Listening to messages for chatId:', chatId);
 
     const messagesRef = collection(db, 'messages');
+    // Use simple query without orderBy to avoid index requirements
     const q = query(
       messagesRef,
-      where('chatId', '==', chatId),
-      orderBy('timestamp', 'asc')
+      where('chatId', '==', chatId)
     );
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const messagesData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        timestamp: doc.data().timestamp?.toDate?.() || new Date()
-      }));
-      setMessages(messagesData);
-    });
+    const unsubscribe = onSnapshot(
+      q, 
+      (snapshot) => {
+        console.log(`Received ${snapshot.docs.length} messages for chatId: ${chatId}`);
+        // Sort messages in memory by timestamp
+        const messagesData = snapshot.docs
+          .map(doc => ({
+            id: doc.id,
+            ...doc.data(),
+            timestamp: doc.data().timestamp?.toDate?.() || new Date()
+          }))
+          .sort((a, b) => a.timestamp - b.timestamp); // Oldest first
+        setMessages(messagesData);
+      },
+      (error) => {
+        console.error('Error listening to messages:', error);
+        alert('Failed to load messages. Please check your connection.');
+      }
+    );
 
     return () => unsubscribe();
-  }, [isOpen, currentUser, otherUser]);
+  }, [isOpen, currentUser, otherUser, propertyInfo]);
 
   if (!isOpen) return null;
 
@@ -164,6 +189,11 @@ export default function Messages({ isOpen, onClose, currentUser, otherUser, user
                     • {propertyInfo.name}
                   </span>
                 )}
+                {messages.length > 0 && (
+                  <span className="ml-2 text-gray-400">
+                    • {messages.length} message{messages.length !== 1 ? 's' : ''}
+                  </span>
+                )}
               </p>
             </div>
           </div>
@@ -176,54 +206,69 @@ export default function Messages({ isOpen, onClose, currentUser, otherUser, user
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50">
           {messages.length === 0 ? (
             <div className="text-center text-gray-500 py-8">
-              <p>No messages yet. Start the conversation!</p>
+              <FaUser className="mx-auto text-4xl text-gray-300 mb-4" />
+              <p className="font-medium">No messages yet</p>
+              <p className="text-sm mt-2">Start the conversation!</p>
             </div>
           ) : (
-            messages.map((message) => (
-              <div
-                key={message.id}
-                className={`flex ${message.senderId === currentUser.uid ? 'justify-end' : 'justify-start'}`}
-              >
+            <>
+              {messages.map((message) => (
                 <div
-                  className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
-                    message.senderId === currentUser.uid
-                      ? 'bg-blue-500 text-white'
-                      : 'bg-gray-100 text-gray-900'
-                  }`}
+                  key={message.id}
+                  className={`flex ${message.senderId === currentUser.uid ? 'justify-end' : 'justify-start'}`}
                 >
-                  <p className="text-sm">{message.message}</p>
-                  <p className={`text-xs mt-1 ${
-                    message.senderId === currentUser.uid ? 'text-blue-100' : 'text-gray-500'
-                  }`}>
-                    {message.timestamp?.toLocaleTimeString() || 'Now'}
-                  </p>
+                  <div
+                    className={`max-w-xs lg:max-w-md px-4 py-2 rounded-2xl shadow-sm ${
+                      message.senderId === currentUser.uid
+                        ? 'bg-blue-500 text-white rounded-br-sm'
+                        : 'bg-white text-gray-900 rounded-bl-sm border border-gray-200'
+                    }`}
+                  >
+                    <p className="text-sm break-words">{message.message}</p>
+                    <p className={`text-xs mt-1 ${
+                      message.senderId === currentUser.uid ? 'text-blue-100' : 'text-gray-400'
+                    }`}>
+                      {message.timestamp ? new Date(message.timestamp).toLocaleTimeString('en-US', { 
+                        hour: '2-digit', 
+                        minute: '2-digit' 
+                      }) : 'Now'}
+                    </p>
+                  </div>
                 </div>
-              </div>
-            ))
+              ))}
+              <div ref={messagesEndRef} />
+            </>
           )}
         </div>
 
         {/* Message Input */}
-        <form onSubmit={sendMessage} className="p-4 border-t bg-gray-50 rounded-b-xl">
-          <div className="flex gap-2">
+        <form onSubmit={sendMessage} className="p-4 border-t bg-white rounded-b-xl">
+          <div className="flex gap-3">
             <input
               type="text"
               value={newMessage}
               onChange={(e) => setNewMessage(e.target.value)}
+              onKeyPress={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  sendMessage(e);
+                }
+              }}
               placeholder="Type your message..."
-              className="flex-1 px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               disabled={loading}
+              autoFocus
             />
             <button
               type="submit"
               disabled={!newMessage.trim() || loading}
-              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition flex items-center gap-2"
+              className="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed transition flex items-center gap-2 font-medium shadow-sm"
             >
-              <FaPaperPlane />
-              {loading ? 'Sending...' : 'Send'}
+              <FaPaperPlane className="text-sm" />
+              <span className="hidden sm:inline">{loading ? 'Sending...' : 'Send'}</span>
             </button>
           </div>
         </form>
