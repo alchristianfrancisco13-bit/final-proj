@@ -26,7 +26,7 @@ import {
   FaSearch, FaFilter, FaSortAmountUp, FaThumbsUp, FaExclamationTriangle,
   FaDownload, FaUpload, FaBell, FaCog as FaSettings, FaChartBar, FaHistory,
   FaCalendarCheck, FaComments as FaMessage, FaCopy, FaCamera, FaTag as FaPriceTag,
-  FaPercentage, FaQrcode, FaMobile, FaDesktop, FaTablet
+  FaPercentage, FaQrcode, FaMobile, FaDesktop, FaTablet, FaInfoCircle
 } from "react-icons/fa";
 import Messages from "./components/Messages";
 import { approveBookingTransaction } from "./utils/transactions";
@@ -88,6 +88,32 @@ useEffect(() => {
           today: data.todayBookings || 0,
           upcoming: data.upcomingBookings || 0
         }));
+        // Sync wallet balance with total earnings
+        setWalletBalance(data.totalEarnings || 0);
+        
+        // Calculate points and level based on bookings
+        const totalBookings = data.totalBookings || 0;
+        const calculatedPoints = totalBookings * 50; // 50 points per booking
+        setHostPoints(calculatedPoints);
+        
+        // Determine level based on bookings
+        let level = 'Bronze Host';
+        if (totalBookings >= 100) level = 'Diamond Host';
+        else if (totalBookings >= 50) level = 'Platinum Host';
+        else if (totalBookings >= 25) level = 'Gold Host';
+        else if (totalBookings >= 10) level = 'Silver Host';
+        setHostLevel(level);
+        
+        // Calculate realistic host rating based on bookings
+        if (totalBookings > 0) {
+          // Base rating starts at 4.5, improves with more bookings
+          const baseRating = 4.5;
+          const bonusRating = Math.min(0.5, (totalBookings / 100) * 0.5);
+          const calculatedRating = Math.min(5.0, baseRating + bonusRating);
+          setDashboard(prev => ({ ...prev, hostRating: Number(calculatedRating.toFixed(1)) }));
+        } else {
+          setDashboard(prev => ({ ...prev, hostRating: 0 }));
+        }
       }
     });
 
@@ -182,12 +208,13 @@ useEffect(() => {
     today: 0,
     upcoming: 0,
     totalEarnings: 0,
-    hostRating: 4.7,
-    averageRating: 4.8,
-    occupancyRate: 87,
-    responseRate: 98,
+    totalBookings: 0,
+    hostRating: 0,
+    averageRating: 0,
+    occupancyRate: 0,
+    responseRate: 0,
     responseTime: "<1hr",
-    cancellationRate: 3,
+    cancellationRate: 0,
     monthlyRevenue: 0
   });
   const [profile, setProfile] = useState(() => {
@@ -225,11 +252,22 @@ useEffect(() => {
     bedrooms: 2,
     bathrooms: 1
   });
-  const [hostPoints, setHostPoints] = useState(1500);
-  const [coupons, setCoupons] = useState([
-    { id: "C-001", name: "New Host Welcome", discount: 20, code: "WELCOME20", validUntil: "2024-12-31" },
-    { id: "C-002", name: "Early Bird Special", discount: 15, code: "EARLYBIRD15", validUntil: "2024-10-31" }
-  ]);
+  const [hostPoints, setHostPoints] = useState(0);
+  const [hostLevel, setHostLevel] = useState('Bronze Host');
+  const [coupons, setCoupons] = useState([]);
+  const [couponsLoaded, setCouponsLoaded] = useState(false);
+  const [showRewardsModal, setShowRewardsModal] = useState(false);
+  const [showAddCouponModal, setShowAddCouponModal] = useState(false);
+  const [newCoupon, setNewCoupon] = useState({
+    name: '',
+    discount: '',
+    code: '',
+    validUntil: '',
+    minBookings: 1,
+    maxUses: 1,
+    description: '',
+    active: true
+  });
   const [paymentMethods, setPaymentMethods] = useState([
     { id: "P-001", type: "GCash", account: "0923-456-7890", status: "Active" },
     { id: "P-002", type: "PayMaya", account: "host@paymaya.com", status: "Active" },
@@ -238,6 +276,13 @@ useEffect(() => {
   ]);
   const [showPayPalPayment, setShowPayPalPayment] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState(0);
+
+  // Wallet & Earnings State
+  const [walletBalance, setWalletBalance] = useState(0);
+  const [transactions, setTransactions] = useState([]);
+  const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [withdrawAmount, setWithdrawAmount] = useState('');
+  const [withdrawMethod, setWithdrawMethod] = useState('GCash');
 
   // Functional checklist implementations
   
@@ -700,21 +745,45 @@ useEffect(() => {
       return checkInDate >= tomorrow && (b.status === 'Upcoming' || b.status === 'PendingApproval');
     }).length;
 
-    // Calculate occupancy rate
-    const totalBookings = bookings.length;
-    const completedBookings = bookings.filter(b => b.status === 'Completed').length;
-    const occupancyRate = totalBookings > 0 ? Math.round((completedBookings / totalBookings) * 100) : 0;
+    // Calculate occupancy rate - realistic calculation based on nights booked
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    const totalAvailableNights = listings.length * daysInMonth; // Total nights available across all listings
+    
+    // Calculate total nights booked (from completed and upcoming bookings in this month)
+    const nightsBooked = bookings.filter(b => {
+      if (!b.checkIn || !b.checkOut) return false;
+      if (b.status !== 'Completed' && b.status !== 'Upcoming') return false;
+      
+      const checkIn = b.checkIn.toDate ? b.checkIn.toDate() : new Date(b.checkIn);
+      const checkOut = b.checkOut.toDate ? b.checkOut.toDate() : new Date(b.checkOut);
+      const bookingMonth = checkIn.getMonth();
+      const bookingYear = checkIn.getFullYear();
+      
+      // Only count bookings from current month
+      if (bookingMonth === now.getMonth() && bookingYear === now.getFullYear()) {
+        const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+        return nights;
+      }
+      return false;
+    }).reduce((total, b) => {
+      const checkIn = b.checkIn.toDate ? b.checkIn.toDate() : new Date(b.checkIn);
+      const checkOut = b.checkOut.toDate ? b.checkOut.toDate() : new Date(b.checkOut);
+      const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+      return total + nights;
+    }, 0);
+    
+    const occupancyRate = totalAvailableNights > 0 ? Math.min(Math.round((nightsBooked / totalAvailableNights) * 100), 100) : 0;
 
     // Calculate average rating from all listings
     const ratingsSum = listings.reduce((sum, l) => sum + (l.rating || 0), 0);
-    const averageRating = listings.length > 0 ? (ratingsSum / listings.length).toFixed(1) : '0.0';
+    const averageRating = listings.length > 0 ? Number((ratingsSum / listings.length).toFixed(1)) : 0;
 
     // Calculate response rate (based on bookings)
     const totalRequests = bookings.length;
     const respondedRequests = bookings.filter(b => 
       b.status !== 'PendingApproval'
     ).length;
-    const responseRate = totalRequests > 0 ? Math.round((respondedRequests / totalRequests) * 100) : 100;
+    const responseRate = totalRequests > 0 ? Math.round((respondedRequests / totalRequests) * 100) : 0;
 
     setDashboard(prev => ({
       ...prev,
@@ -737,7 +806,43 @@ useEffect(() => {
   const handleApproveBooking = async (booking) => {
     try {
       await approveBookingTransaction(db, booking.id);
-      alert("Booking approved");
+      
+      // Add earnings to wallet when booking is approved (95% after 5% admin commission)
+      const totalAmount = booking.total || booking.price || 0;
+      const hostEarnings = totalAmount * 0.95; // 95% for host, 5% goes to admin
+      addEarningsToWallet(
+        hostEarnings,
+        `Booking: ${booking.title} - ${booking.guestName || 'Guest'} (95% after 5% admin fee)`,
+        booking.id
+      );
+      
+      // Count guest's total APPROVED bookings from Firestore for accuracy
+      try {
+        const guestBookingsQuery = query(
+          collection(db, 'bookings'),
+          where('guestId', '==', booking.guestId),
+          where('status', 'in', ['Upcoming', 'Completed'])
+        );
+        const guestBookingsSnapshot = await getDocs(guestBookingsQuery);
+        const totalBookings = guestBookingsSnapshot.size;
+        
+        console.log(`Guest ${booking.guestEmail} has ${totalBookings} approved bookings`);
+        
+        const reward = await giveGuestReward(
+          booking.guestId, 
+          booking.guestEmail,
+          totalBookings
+        );
+        
+        if (reward) {
+          alert(`Booking approved! Guest earned a reward: ${reward.name} (${reward.discount}% OFF)`);
+        } else {
+          alert("Booking approved and earnings added to wallet!");
+        }
+      } catch (rewardError) {
+        console.error("Error giving reward:", rewardError);
+        alert("Booking approved! (Note: Reward distribution had an issue)");
+      }
     } catch (e) {
       console.error("Approve booking failed:", e);
       alert("Failed to approve booking. Please try again.");
@@ -835,7 +940,157 @@ useEffect(() => {
   };
 
   const handlePointsRewards = () => {
-    alert(`Points & Rewards:\nCurrent Points: ${hostPoints}\nAvailable Coupons: ${coupons.length}\nEarnings: ₱${dashboard.totalEarnings.toLocaleString()}`);
+    setShowRewardsModal(true);
+  };
+
+  // Wallet Management Functions
+  const addEarningsToWallet = (amount, description, bookingId) => {
+    const transaction = {
+      id: `TXN-${Date.now()}`,
+      type: 'earning',
+      amount: amount,
+      description: description,
+      bookingId: bookingId,
+      date: new Date().toISOString(),
+      status: 'completed'
+    };
+    
+    setTransactions(prev => [transaction, ...prev]);
+    setWalletBalance(prev => prev + amount);
+    
+    // Update total earnings in dashboard
+    setDashboard(prev => ({
+      ...prev,
+      totalEarnings: prev.totalEarnings + amount
+    }));
+  };
+
+  const handleWithdraw = () => {
+    const amount = parseFloat(withdrawAmount);
+    
+    if (!amount || amount <= 0) {
+      alert('Please enter a valid amount');
+      return;
+    }
+    
+    if (amount > walletBalance) {
+      alert('Insufficient balance');
+      return;
+    }
+    
+    const transaction = {
+      id: `TXN-${Date.now()}`,
+      type: 'withdrawal',
+      amount: amount,
+      description: `Withdrawal to ${withdrawMethod}`,
+      method: withdrawMethod,
+      date: new Date().toISOString(),
+      status: 'processing'
+    };
+    
+    setTransactions(prev => [transaction, ...prev]);
+    setWalletBalance(prev => prev - amount);
+    setWithdrawAmount('');
+    setShowWithdrawModal(false);
+    
+    alert(`Withdrawal of ₱${amount.toLocaleString()} to ${withdrawMethod} is being processed.`);
+  };
+
+  const getTransactionIcon = (type) => {
+    switch(type) {
+      case 'earning': return <FaMoneyBillWave className="text-green-500" />;
+      case 'withdrawal': return <FaCreditCard className="text-blue-500" />;
+      default: return <FaWallet className="text-gray-500" />;
+    }
+  };
+
+  // Coupon & Rewards Management Functions
+  const giveGuestReward = async (guestId, guestEmail, bookingCount) => {
+    // Find eligible coupons based on booking count
+    const eligibleCoupons = coupons.filter(coupon => 
+      coupon.active && 
+      bookingCount >= coupon.minBookings &&
+      !coupon.usedBy.includes(guestId) &&
+      new Date(coupon.validUntil) > new Date()
+    );
+
+    if (eligibleCoupons.length === 0) return;
+
+    // Give the best coupon (highest discount)
+    const bestCoupon = eligibleCoupons.sort((a, b) => b.discount - a.discount)[0];
+
+    try {
+      // Store reward in Firestore for the guest
+      await addDoc(collection(db, 'guestRewards'), {
+        guestId: guestId,
+        guestEmail: guestEmail,
+        hostId: auth.currentUser?.uid,
+        couponId: bestCoupon.id,
+        couponCode: bestCoupon.code,
+        couponName: bestCoupon.name,
+        discount: bestCoupon.discount,
+        description: bestCoupon.description,
+        validUntil: bestCoupon.validUntil,
+        isUsed: false,
+        givenAt: new Date().toISOString()
+      });
+
+      // Mark coupon as used by this guest
+      setCoupons(prev => prev.map(c => 
+        c.id === bestCoupon.id 
+          ? { ...c, usedBy: [...c.usedBy, guestId] }
+          : c
+      ));
+
+      return bestCoupon;
+    } catch (error) {
+      console.error('Error giving reward:', error);
+      return null;
+    }
+  };
+
+  const handleAddCoupon = () => {
+    if (!newCoupon.name || !newCoupon.code || !newCoupon.discount) {
+      alert('Please fill in all required fields');
+      return;
+    }
+
+    const coupon = {
+      id: `C-${Date.now()}`,
+      ...newCoupon,
+      discount: parseFloat(newCoupon.discount),
+      minBookings: parseInt(newCoupon.minBookings),
+      maxUses: parseInt(newCoupon.maxUses),
+      usedBy: [],
+      createdAt: new Date().toISOString()
+    };
+
+    setCoupons(prev => [coupon, ...prev]);
+    setNewCoupon({
+      name: '',
+      discount: '',
+      code: '',
+      validUntil: '',
+      minBookings: 1,
+      maxUses: 1,
+      description: '',
+      active: true
+    });
+    setShowAddCouponModal(false);
+    alert('Coupon created successfully!');
+  };
+
+  const handleDeleteCoupon = (couponId) => {
+    if (window.confirm('Are you sure you want to delete this coupon?')) {
+      setCoupons(prev => prev.filter(c => c.id !== couponId));
+      alert('Coupon deleted successfully!');
+    }
+  };
+
+  const handleToggleCouponStatus = (couponId) => {
+    setCoupons(prev => prev.map(c => 
+      c.id === couponId ? { ...c, active: !c.active } : c
+    ));
   };
 
   // Function to download host data as Word document
@@ -908,16 +1163,24 @@ useEffect(() => {
     document.body.removeChild(downloadLink);
   };
 
-  // Save to localStorage and update profile when auth changes
+  // Save profile to localStorage (listings are stored in Firestore only)
   useEffect(() => {
     if (auth.currentUser?.uid) {
-      localStorage.setItem("hostListings", JSON.stringify(listings));
-      localStorage.setItem(`hostProfile_${auth.currentUser.uid}`, JSON.stringify({
-        ...profile,
-        email: auth.currentUser.email // Always ensure email matches auth
-      }));
+      try {
+        // Only save profile data (small), not listings (can be large with images)
+        localStorage.setItem(`hostProfile_${auth.currentUser.uid}`, JSON.stringify({
+          ...profile,
+          email: auth.currentUser.email // Always ensure email matches auth
+        }));
+      } catch (error) {
+        if (error.name === 'QuotaExceededError') {
+          console.warn('LocalStorage quota exceeded, skipping save');
+        } else {
+          console.error('Error saving to localStorage:', error);
+        }
+      }
     }
-  }, [listings, profile]);
+  }, [profile]);
 
   // Update profile when auth state changes
   useEffect(() => {
@@ -932,6 +1195,93 @@ useEffect(() => {
       }));
     }
   }, [auth.currentUser]);
+
+  // Load host coupons from Firestore
+  useEffect(() => {
+    const loadHostCoupons = async () => {
+      const userId = auth.currentUser?.uid;
+      if (!userId) return;
+
+      try {
+        const hostCouponsRef = doc(db, 'hostCoupons', userId);
+        const hostCouponsDoc = await getDoc(hostCouponsRef);
+        
+        if (hostCouponsDoc.exists()) {
+          const data = hostCouponsDoc.data();
+          setCoupons(data.coupons || []);
+          console.log('Loaded host coupons from Firestore:', data.coupons?.length);
+        } else {
+          // Initialize with default coupons for new hosts
+          const defaultCoupons = [
+            { 
+              id: "C-001", 
+              name: "New Guest Welcome", 
+              discount: 15, 
+              code: "NEWGUEST15", 
+              validUntil: "2025-12-31",
+              minBookings: 1,
+              maxUses: 1,
+              description: "Welcome discount for first booking",
+              active: true,
+              usedBy: []
+            },
+            { 
+              id: "C-002", 
+              name: "Loyal Guest Reward", 
+              discount: 20, 
+              code: "LOYAL20", 
+              validUntil: "2025-12-31",
+              minBookings: 3,
+              maxUses: 1,
+              description: "Reward for 3+ bookings",
+              active: true,
+              usedBy: []
+            },
+            { 
+              id: "C-003", 
+              name: "Super Guest VIP", 
+              discount: 25, 
+              code: "VIP25", 
+              validUntil: "2025-12-31",
+              minBookings: 5,
+              maxUses: 1,
+              description: "VIP discount for 5+ bookings",
+              active: true,
+              usedBy: []
+            }
+          ];
+          setCoupons(defaultCoupons);
+          // Save default coupons to Firestore
+          await setDoc(hostCouponsRef, { coupons: defaultCoupons });
+          console.log('Created default coupons for new host');
+        }
+        setCouponsLoaded(true);
+      } catch (error) {
+        console.error('Error loading host coupons:', error);
+        setCouponsLoaded(true);
+      }
+    };
+
+    loadHostCoupons();
+  }, []);
+
+  // Save host coupons to Firestore whenever they change
+  useEffect(() => {
+    const saveHostCoupons = async () => {
+      const userId = auth.currentUser?.uid;
+      if (!userId || !couponsLoaded) return; // Don't save until initial load is complete
+
+      try {
+        const hostCouponsRef = doc(db, 'hostCoupons', userId);
+        await setDoc(hostCouponsRef, { coupons });
+        console.log('Saved host coupons to Firestore');
+      } catch (error) {
+        console.error('Error saving host coupons:', error);
+      }
+    };
+
+    saveHostCoupons();
+  }, [coupons, couponsLoaded]);
 
   return (
 <div className="min-h-screen bg-gradient-to-br from-yellow-50 via-amber-50 to-white py-10 px-2 overflow-x-hidden">
@@ -1094,27 +1444,29 @@ useEffect(() => {
               <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-blue-500">
                 <div className="flex items-center justify-between">
             <div>
-                    <p className="text-sm font-medium text-gray-600">Average Rating</p>
-                    <p className="text-2xl font-bold text-gray-900">{dashboard.averageRating || "4.8"}</p>
+                    <p className="text-sm font-medium text-gray-600">Host Rating</p>
+                    <p className="text-2xl font-bold text-gray-900">
+                      {dashboard.hostRating > 0 ? dashboard.hostRating : "No rating yet"}
+                    </p>
                     <p className="text-sm text-gray-500 flex items-center gap-1">
                       <FaStar className="text-yellow-400" />
-                      Excellent host
+                      {dashboard.hostRating >= 4.8 ? "Excellent" : dashboard.hostRating >= 4.5 ? "Great" : dashboard.hostRating > 0 ? "Good" : "Get bookings"}
                     </p>
                   </div>
                   <FaStar className="text-3xl text-blue-500" />
             </div>
           </div>
 
-              <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-purple-500">
+              <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-yellow-500">
                 <div className="flex items-center justify-between">
             <div>
-                    <p className="text-sm font-medium text-gray-600">Occupancy Rate</p>
-                    <p className="text-2xl font-bold text-gray-900">{dashboard.occupancyRate || "87"}%</p>
-                    <p className="text-sm text-purple-600 flex items-center gap-1">
-                      Optimal performance
+                    <p className="text-sm font-medium text-gray-600">Host Level</p>
+                    <p className="text-2xl font-bold text-gray-900">{hostLevel}</p>
+                    <p className="text-sm text-yellow-600 flex items-center gap-1">
+                      {dashboard.totalBookings || 0} total bookings
                     </p>
                   </div>
-                  <FaChartPie className="text-3xl text-purple-500" />
+                  <FaGift className="text-3xl text-yellow-500" />
             </div>
           </div>
 
@@ -1122,10 +1474,10 @@ useEffect(() => {
                 <div className="flex items-center justify-between">
             <div>
                     <p className="text-sm font-medium text-gray-600">Response Rate</p>
-                    <p className="text-2xl font-bold text-gray-900">{dashboard.responseRate || "98"}%</p>
+                    <p className="text-2xl font-bold text-gray-900">{dashboard.responseRate}%</p>
                     <p className="text-sm text-yellow-700 flex items-center gap-1">
                       <FaMessage />
-                      {dashboard.responseTime || "<1hr"}
+                      {dashboard.responseRate > 0 ? dashboard.responseTime : "No requests yet"}
                     </p>
                   </div>
                   <FaComments className="text-3xl text-pink-500" />
@@ -1223,13 +1575,6 @@ useEffect(() => {
                   >
                     <FaGift className="text-purple-600" />
                     <span className="text-sm font-medium text-purple-700">Rewards</span>
-                  </button>
-                  <button 
-                    onClick={() => handlePayPalPayment(1000)}
-                    className="flex items-center gap-3 p-4 bg-blue-50 rounded-lg hover:bg-blue-100 transition"
-                  >
-                    <FaCreditCard className="text-blue-600" />
-                    <span className="text-sm font-medium text-blue-700">PayPal Payment</span>
                   </button>
                 </div>
               </div>
@@ -1583,193 +1928,588 @@ useEffect(() => {
           </div>
         )}
 
+        {/* Earnings/Wallet Tab */}
+        {activeTab === "earnings" && (
+          <div className="space-y-6">
+            {/* Wallet Header */}
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">Wallet & Earnings</h2>
+                <p className="text-gray-600">Manage your earnings and withdrawals</p>
+              </div>
+            </div>
+
+            {/* Wallet Balance Card */}
+            <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl shadow-lg p-8 text-white">
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <p className="text-green-100 text-sm font-medium mb-2">Available Balance</p>
+                  <h3 className="text-4xl font-bold">₱{walletBalance.toLocaleString()}</h3>
+                </div>
+                <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center">
+                  <FaWallet className="text-3xl" />
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="bg-white/10 rounded-lg p-3">
+                  <p className="text-green-100 text-xs mb-1">Total Earnings</p>
+                  <p className="text-xl font-bold">₱{dashboard.totalEarnings.toLocaleString()}</p>
+                </div>
+                <div className="bg-white/10 rounded-lg p-3">
+                  <p className="text-green-100 text-xs mb-1">This Month</p>
+                  <p className="text-xl font-bold">₱{dashboard.monthlyRevenue.toLocaleString()}</p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setShowWithdrawModal(true)}
+                className="w-full bg-white text-green-600 px-6 py-3 rounded-lg hover:bg-green-50 transition font-semibold flex items-center justify-center gap-2"
+              >
+                <FaCreditCard />
+                Withdraw Funds
+              </button>
+            </div>
+
+            {/* Stats Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-blue-500">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">Total Transactions</p>
+                    <p className="text-2xl font-bold text-gray-900">{transactions.length}</p>
+                  </div>
+                  <FaHistory className="text-3xl text-blue-500" />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-green-500">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">Total Earnings</p>
+                    <p className="text-2xl font-bold text-gray-900">
+                      ₱{transactions.filter(t => t.type === 'earning').reduce((sum, t) => sum + t.amount, 0).toLocaleString()}
+                    </p>
+                  </div>
+                  <FaMoneyBillWave className="text-3xl text-green-500" />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-purple-500">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">Total Withdrawals</p>
+                    <p className="text-2xl font-bold text-gray-900">
+                      ₱{transactions.filter(t => t.type === 'withdrawal').reduce((sum, t) => sum + t.amount, 0).toLocaleString()}
+                    </p>
+                  </div>
+                  <FaCreditCard className="text-3xl text-purple-500" />
+                </div>
+              </div>
+            </div>
+
+            {/* Transaction History */}
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-xl font-bold text-gray-900">Transaction History</h3>
+                <div className="flex items-center gap-2">
+                  <FaHistory className="text-gray-400" />
+                  <span className="text-sm text-gray-600">{transactions.length} transactions</span>
+                </div>
+              </div>
+
+              {transactions.length > 0 ? (
+                <div className="space-y-3">
+                  {transactions.slice(0, 10).map((transaction) => (
+                    <div 
+                      key={transaction.id}
+                      className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition"
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className={`w-12 h-12 rounded-full flex items-center justify-center ${
+                          transaction.type === 'earning' ? 'bg-green-100' : 'bg-blue-100'
+                        }`}>
+                          {getTransactionIcon(transaction.type)}
+                        </div>
+                        <div>
+                          <p className="font-semibold text-gray-900">{transaction.description}</p>
+                          <div className="flex items-center gap-2 text-sm text-gray-600">
+                            <span>{new Date(transaction.date).toLocaleDateString('en-US', { 
+                              month: 'short', 
+                              day: 'numeric', 
+                              year: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit'
+                            })}</span>
+                            <span>•</span>
+                            <span className={`px-2 py-1 rounded-full text-xs ${
+                              transaction.status === 'completed' ? 'bg-green-100 text-green-700' : 
+                              transaction.status === 'processing' ? 'bg-yellow-100 text-yellow-700' : 
+                              'bg-gray-100 text-gray-700'
+                            }`}>
+                              {transaction.status}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className={`text-lg font-bold ${
+                          transaction.type === 'earning' ? 'text-green-600' : 'text-blue-600'
+                        }`}>
+                          {transaction.type === 'earning' ? '+' : '-'}₱{transaction.amount.toLocaleString()}
+                        </p>
+                        {transaction.method && (
+                          <p className="text-xs text-gray-500">{transaction.method}</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-12 text-gray-500">
+                  <FaWallet className="text-6xl mx-auto mb-4 text-gray-300" />
+                  <h3 className="text-lg font-semibold mb-2">No Transactions Yet</h3>
+                  <p className="text-sm">Your transaction history will appear here</p>
+                  <p className="text-sm">Start earning by accepting bookings!</p>
+                </div>
+              )}
+            </div>
+
+            {/* Payment Methods Info */}
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <h3 className="text-xl font-bold text-gray-900 mb-4">Withdrawal Methods</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {paymentMethods.filter(p => p.status === 'Active').map((method) => (
+                  <div key={method.id} className="border rounded-lg p-4 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <FaCreditCard className="text-2xl text-blue-500" />
+                      <div>
+                        <p className="font-semibold text-gray-900">{method.type}</p>
+                        <p className="text-sm text-gray-600">{method.account}</p>
+                      </div>
+                    </div>
+                    <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium">
+                      {method.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Withdraw Modal */}
+        {showWithdrawModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-md">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-2xl font-bold text-gray-900">Withdraw Funds</h3>
+                <button 
+                  onClick={() => setShowWithdrawModal(false)}
+                  className="p-2 rounded-lg hover:bg-gray-100 transition"
+                >
+                  <FaTimes className="text-gray-600" />
+                </button>
+              </div>
+
+              <div className="mb-6">
+                <div className="bg-green-50 rounded-lg p-4 mb-4">
+                  <p className="text-sm text-gray-600 mb-1">Available Balance</p>
+                  <p className="text-3xl font-bold text-green-600">₱{walletBalance.toLocaleString()}</p>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Withdrawal Amount
+                    </label>
+                    <input
+                      type="number"
+                      value={withdrawAmount}
+                      onChange={(e) => setWithdrawAmount(e.target.value)}
+                      className="w-full border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-green-500"
+                      placeholder="Enter amount"
+                      min="0"
+                      max={walletBalance}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Withdrawal Method
+                    </label>
+                    <select
+                      value={withdrawMethod}
+                      onChange={(e) => setWithdrawMethod(e.target.value)}
+                      className="w-full border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-green-500"
+                    >
+                      {paymentMethods.filter(p => p.status === 'Active').map((method) => (
+                        <option key={method.id} value={method.type}>
+                          {method.type} - {method.account}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowWithdrawModal(false)}
+                  className="flex-1 border border-gray-300 text-gray-700 px-4 py-3 rounded-lg hover:bg-gray-50 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleWithdraw}
+                  className="flex-1 bg-green-500 text-white px-4 py-3 rounded-lg hover:bg-green-600 transition font-semibold flex items-center justify-center gap-2"
+                >
+                  <FaCreditCard />
+                  Withdraw
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Rewards & Coupons Management Modal */}
+        {showRewardsModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 overflow-y-auto py-8">
+            <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-5xl relative my-auto max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-6 sticky top-0 bg-white z-10 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 bg-gradient-to-br from-pink-500 to-purple-500 rounded-full flex items-center justify-center">
+                    <FaGift className="text-white text-xl" />
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-bold text-gray-900">Rewards & Coupons</h3>
+                    <p className="text-sm text-gray-600">Manage guest rewards and automatic coupon distribution</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowRewardsModal(false)}
+                  className="p-2 rounded-lg hover:bg-gray-100 transition"
+                >
+                  <FaTimes className="text-gray-600 text-xl" />
+                </button>
+              </div>
+
+              {/* Stats Overview */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg p-4">
+                  <p className="text-sm font-medium text-blue-700">Total Coupons</p>
+                  <p className="text-3xl font-bold text-blue-900">{coupons.length}</p>
+                </div>
+                <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-lg p-4">
+                  <p className="text-sm font-medium text-green-700">Active Coupons</p>
+                  <p className="text-3xl font-bold text-green-900">{coupons.filter(c => c.active).length}</p>
+                </div>
+                <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-4">
+                  <p className="text-sm font-medium text-purple-700">Total Distributed</p>
+                  <p className="text-3xl font-bold text-purple-900">
+                    {coupons.reduce((sum, c) => sum + c.usedBy.length, 0)}
+                  </p>
+                </div>
+                <div className="bg-gradient-to-br from-pink-50 to-pink-100 rounded-lg p-4">
+                  <p className="text-sm font-medium text-pink-700">Host Points</p>
+                  <p className="text-3xl font-bold text-pink-900">{hostPoints.toLocaleString()}</p>
+                  <p className="text-xs text-pink-600 mt-1">Earn 50 points per booking</p>
+                </div>
+                <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-4">
+                  <p className="text-sm font-medium text-purple-700">Host Level</p>
+                  <p className="text-xl font-bold text-purple-900">{hostLevel}</p>
+                  <p className="text-xs text-purple-600 mt-1">Based on total bookings</p>
+                </div>
+              </div>
+
+              {/* Add Coupon Button */}
+              <div className="mb-6">
+                <button
+                  onClick={() => setShowAddCouponModal(true)}
+                  className="w-full bg-gradient-to-r from-pink-500 to-purple-500 text-white px-6 py-4 rounded-lg hover:from-pink-600 hover:to-purple-600 transition font-semibold flex items-center justify-center gap-2 shadow-lg"
+                >
+                  <FaPlus />
+                  Create New Coupon
+                </button>
+              </div>
+
+              {/* How It Works Section */}
+              <div className="bg-blue-50 rounded-lg p-4 mb-6">
+                <h4 className="font-semibold text-blue-900 mb-2 flex items-center gap-2">
+                  <FaInfoCircle className="text-blue-600" />
+                  How Automatic Rewards Work
+                </h4>
+                <ul className="text-sm text-blue-800 space-y-1">
+                  <li>• Guests automatically receive coupons based on their booking count</li>
+                  <li>• Set minimum bookings required for each coupon tier</li>
+                  <li>• Guests receive the best available coupon they qualify for</li>
+                  <li>• Coupons are stored in their account for future bookings</li>
+                </ul>
+              </div>
+
+              {/* Coupons List */}
+              <div className="space-y-4">
+                <h4 className="font-bold text-lg text-gray-900">Your Coupon Tiers</h4>
+                {coupons.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {coupons.map((coupon) => (
+                      <div 
+                        key={coupon.id}
+                        className={`border-2 rounded-xl p-5 transition ${
+                          coupon.active 
+                            ? 'border-green-300 bg-gradient-to-br from-green-50 to-emerald-50' 
+                            : 'border-gray-300 bg-gray-50 opacity-60'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between mb-3">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-2">
+                              <h5 className="font-bold text-lg text-gray-900">{coupon.name}</h5>
+                              <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                                coupon.active 
+                                  ? 'bg-green-100 text-green-700' 
+                                  : 'bg-gray-200 text-gray-600'
+                              }`}>
+                                {coupon.active ? 'Active' : 'Inactive'}
+                              </span>
+                            </div>
+                            <p className="text-sm text-gray-600 mb-2">{coupon.description}</p>
+                          </div>
+                        </div>
+
+                        {/* Discount Badge */}
+                        <div className="bg-gradient-to-r from-pink-500 to-purple-500 text-white rounded-lg p-3 mb-3">
+                          <div className="text-center">
+                            <p className="text-3xl font-bold">{coupon.discount}%</p>
+                            <p className="text-sm">Discount</p>
+                          </div>
+                        </div>
+
+                        {/* Coupon Details */}
+                        <div className="space-y-2 mb-4">
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="text-gray-600">Code:</span>
+                            <span className="font-mono font-bold text-purple-600">{coupon.code}</span>
+                          </div>
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="text-gray-600">Min Bookings:</span>
+                            <span className="font-semibold">{coupon.minBookings}</span>
+                          </div>
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="text-gray-600">Max Uses:</span>
+                            <span className="font-semibold">{coupon.maxUses}</span>
+                          </div>
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="text-gray-600">Valid Until:</span>
+                            <span className="font-semibold">
+                              {new Date(coupon.validUntil).toLocaleDateString('en-US', { 
+                                month: 'short', 
+                                day: 'numeric', 
+                                year: 'numeric' 
+                              })}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="text-gray-600">Distributed:</span>
+                            <span className="font-semibold text-green-600">
+                              {coupon.usedBy.length} {coupon.usedBy.length === 1 ? 'guest' : 'guests'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Action Buttons */}
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleToggleCouponStatus(coupon.id)}
+                            className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition ${
+                              coupon.active
+                                ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
+                                : 'bg-green-100 text-green-700 hover:bg-green-200'
+                            }`}
+                          >
+                            {coupon.active ? (
+                              <>
+                                <FaToggleOff className="inline mr-1" />
+                                Deactivate
+                              </>
+                            ) : (
+                              <>
+                                <FaToggleOn className="inline mr-1" />
+                                Activate
+                              </>
+                            )}
+                          </button>
+                          <button
+                            onClick={() => handleDeleteCoupon(coupon.id)}
+                            className="px-3 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition text-sm font-medium"
+                          >
+                            <FaTrash className="inline" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-12 text-gray-500">
+                    <FaGift className="text-6xl mx-auto mb-4 text-gray-300" />
+                    <h3 className="text-lg font-semibold mb-2">No Coupons Yet</h3>
+                    <p className="text-sm">Create your first coupon to reward your guests!</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Add Coupon Modal */}
+        {showAddCouponModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+            <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-2xl">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-2xl font-bold text-gray-900">Create New Coupon</h3>
+                <button 
+                  onClick={() => setShowAddCouponModal(false)}
+                  className="p-2 rounded-lg hover:bg-gray-100 transition"
+                >
+                  <FaTimes className="text-gray-600" />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Coupon Name *
+                    </label>
+                    <input
+                      type="text"
+                      value={newCoupon.name}
+                      onChange={(e) => setNewCoupon({...newCoupon, name: e.target.value})}
+                      className="w-full border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                      placeholder="e.g., First Time Guest"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Coupon Code *
+                    </label>
+                    <input
+                      type="text"
+                      value={newCoupon.code}
+                      onChange={(e) => setNewCoupon({...newCoupon, code: e.target.value.toUpperCase()})}
+                      className="w-full border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-500 font-mono"
+                      placeholder="e.g., FIRST15"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Description
+                  </label>
+                  <textarea
+                    value={newCoupon.description}
+                    onChange={(e) => setNewCoupon({...newCoupon, description: e.target.value})}
+                    className="w-full border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-500 resize-none"
+                    rows="2"
+                    placeholder="Brief description of this reward"
+                  />
+                </div>
+
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Discount % *
+                    </label>
+                    <input
+                      type="number"
+                      value={newCoupon.discount}
+                      onChange={(e) => setNewCoupon({...newCoupon, discount: e.target.value})}
+                      className="w-full border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                      placeholder="15"
+                      min="1"
+                      max="100"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Min Bookings
+                    </label>
+                    <input
+                      type="number"
+                      value={newCoupon.minBookings}
+                      onChange={(e) => setNewCoupon({...newCoupon, minBookings: e.target.value})}
+                      className="w-full border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                      placeholder="1"
+                      min="1"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Max Uses
+                    </label>
+                    <input
+                      type="number"
+                      value={newCoupon.maxUses}
+                      onChange={(e) => setNewCoupon({...newCoupon, maxUses: e.target.value})}
+                      className="w-full border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                      placeholder="1"
+                      min="1"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Valid Until *
+                  </label>
+                  <input
+                    type="date"
+                    value={newCoupon.validUntil}
+                    onChange={(e) => setNewCoupon({...newCoupon, validUntil: e.target.value})}
+                    className="w-full border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    min={new Date().toISOString().split('T')[0]}
+                  />
+                </div>
+
+                <div className="bg-purple-50 rounded-lg p-4">
+                  <p className="text-sm text-purple-800">
+                    <strong>How it works:</strong> This coupon will be automatically given to guests who complete at least <strong>{newCoupon.minBookings || 1} booking(s)</strong> with you. Each guest can use it up to <strong>{newCoupon.maxUses || 1} time(s)</strong>.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex gap-3 mt-6">
+                <button
+                  onClick={() => setShowAddCouponModal(false)}
+                  className="flex-1 border border-gray-300 text-gray-700 px-4 py-3 rounded-lg hover:bg-gray-50 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleAddCoupon}
+                  className="flex-1 bg-gradient-to-r from-pink-500 to-purple-500 text-white px-4 py-3 rounded-lg hover:from-pink-600 hover:to-purple-600 transition font-semibold flex items-center justify-center gap-2"
+                >
+                  <FaPlus />
+                  Create Coupon
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Main Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           {/* Left: Listings & Actions */}
           <div className="space-y-8">
 
-            {/* Add Listing */}
-            <div className="bg-white rounded-xl shadow p-6">
-              <div className="flex items-center gap-2 mb-3">
-                <FaHome className="text-xl text-blue-400" />
-                <span className="font-semibold text-lg">Add Listing</span>
-              </div>
-              <div className="flex gap-2 mb-3">
-              <button
-                  onClick={() => setShowAddListing(true)}
-                className="bg-blue-400 text-white px-3 py-1 rounded hover:bg-blue-500"
-              >
-                  <FaPlus className="inline mr-1" />Add New Listing
-                </button>
-                <button onClick={() => alert("Choose hosting category:\n• Home - Private residences\n• Experience - Activities & tours\n• Service - Professional services")} className="bg-purple-400 text-white px-3 py-1 rounded hover:bg-purple-500">
-                  <FaTag className="inline mr-1" />Categories
-              </button>
-              </div>
-              <p className="text-gray-500 text-sm">
-                Categorize your hosting (Home, Experience, Service).
-              </p>
-            </div>
-
-            {/* Enhanced Listings */}
-            <div className="bg-white rounded-xl shadow p-6">
-              <div className="flex items-center gap-2 mb-3">
-                <FaClipboardList className="text-xl text-blue-400" />
-                <span className="font-semibold text-lg">Your Listings</span>
-              </div>
-              <div className="space-y-3">
-                {listings.map((l) => (
-                  <div key={l.id} className="border rounded-lg p-3">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-medium">{l.title}</span>
-                      <span className={`px-2 py-1 rounded text-xs ${l.status === "Draft" ? "bg-yellow-100 text-yellow-600" : "bg-green-100 text-green-600"}`}>
-                      {l.status}
-                    </span>
-                    </div>
-                    <div className="text-sm text-gray-500 mb-2">
-                      {l.category} • ₱{l.price} • Rating: {l.rating}
-                      {l.discount > 0 && <span className="text-red-500 ml-2">({l.discount}% OFF)</span>}
-                    </div>
-                    <div className="flex gap-1">
-                      <button onClick={() => handleSaveDraft(l.id)} className="bg-yellow-400 text-white px-2 py-1 rounded text-xs hover:bg-yellow-500">
-                        <FaSave className="inline mr-1" />Save Draft
-                      </button>
-                      <button onClick={() => alert(`Edit ${l.title}:\nRating: ${l.rating}\nDiscount: ${l.discount}%\nPromo: ${l.promo}`)} className="bg-blue-400 text-white px-2 py-1 rounded text-xs hover:bg-blue-500">
-                        <FaEdit className="inline mr-1" />Edit
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <p className="text-gray-500 text-sm mt-3">
-                Add, edit, or save your listings as draft. Manage ratings, discounts, and promos.
-              </p>
-            </div>
           </div>
           {/* Right: Messages, Calendar, Payments, Profile */}
           <div className="space-y-8">
 
-            {/* Message History (persistent) */}
-            <div className="bg-white rounded-xl shadow p-6">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <FaComments className="text-blue-500" />
-                  <span className="font-semibold">Message History</span>
-                </div>
-                <button onClick={handleOpenChatList} className="text-sm text-blue-600 hover:underline">Open Messages</button>
-              </div>
-              {recentChats.length === 0 ? (
-                <div className="text-gray-500 text-sm">No conversations yet.</div>
-              ) : (
-                <div className="divide-y rounded-lg border">
-                  {recentChats.slice(0,6).map((chat) => {
-                    const otherId = (chat.participants || []).find((id) => id !== auth.currentUser?.uid);
-                    const otherUser = {
-                      uid: otherId,
-                      displayName: chat.participantNames?.[otherId] || 'User',
-                      email: chat.participantEmails?.[otherId] || 'user@example.com'
-                    };
-                    return (
-                      <button
-                        key={chat.id}
-                        onClick={() => handleSelectChat(otherUser, chat.propertyInfo || null)}
-                        className="w-full text-left p-3 hover:bg-gray-50"
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="truncate">
-                            <div className="font-medium truncate">{otherUser.displayName}</div>
-                            {chat.propertyInfo?.name && (
-                              <div className="text-xs text-blue-600 truncate">📍 {chat.propertyInfo.name}</div>
-                            )}
-                            <div className="text-sm text-gray-600 truncate">{chat.lastMessage || 'No messages yet'}</div>
-                          </div>
-                          <div className="text-xs text-gray-500 ml-2 whitespace-nowrap">
-                            {chat.lastMessageTime?.toDate?.()?.toLocaleString?.() || ''}
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Payment Methods */}
-            <div className="bg-white rounded-xl shadow p-6">
-              <div className="flex items-center gap-2 mb-3">
-                <FaWallet className="text-xl text-blue-400" />
-                <span className="font-semibold text-lg">Receiving Payment Methods</span>
-              </div>
-              <div className="space-y-2 mb-3">
-                {paymentMethods.map(p => (
-                  <div key={p.id} className="flex items-center justify-between border rounded p-2">
-                    <div>
-                      <span className="font-medium">{p.type}</span>
-                      <div className="text-xs text-gray-500">{p.account}</div>
-                    </div>
-                    <span className={`text-xs px-2 py-1 rounded ${p.status === 'Active' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
-                      {p.status}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              <button
-                onClick={handlePaymentMethods}
-                className="w-full bg-blue-400 text-white px-3 py-1 rounded hover:bg-blue-500 mb-2"
-              >
-                Manage Payments
-              </button>
-              <p className="text-gray-500 text-sm">
-                Configure GCash, PayMaya, Bank Transfer, etc.
-              </p>
-            </div>
-
-            {/* Account Settings */}
-            <div className="bg-white rounded-xl shadow p-6">
-              <div className="flex items-center gap-2 mb-3">
-                <FaUser className="text-xl text-blue-400" />
-                <span className="font-semibold text-lg">Account Settings</span>
-              </div>
-              <div className="space-y-3">
-                <div className="border rounded p-3">
-                  <div className="font-medium flex items-center gap-2">
-                    <FaUser className="text-blue-400" />
-                    Profile
-                  </div>
-                  <div className="text-sm text-gray-600 mt-1">{profile.name}</div>
-                  <div className="text-xs text-gray-500">{profile.email}</div>
-                </div>
-                
-                <div className="border rounded p-3">
-                  <div className="font-medium flex items-center gap-2">
-                    <FaClipboardList className="text-green-400" />
-                    Bookings ({listings.length})
-                  </div>
-                  <div className="text-sm text-gray-600 mt-1">
-                    Active: {listings.filter(l => l.status === 'Published').length}
-                  </div>
-                </div>
-                
-                <div className="border rounded p-3">
-                  <div className="font-medium flex items-center gap-2">
-                    <FaTag className="text-pink-400" />
-                    Coupons ({coupons.length})
-                  </div>
-                  <div className="text-sm text-gray-600 mt-1">
-                    Available: {coupons.filter(c => new Date(c.validUntil) > new Date()).length}
-              </div>
-              </div>
-              </div>
-              
-              <button
-                onClick={handleAccountSettings}
-                className="w-full mt-3 bg-blue-400 text-white px-3 py-1 rounded hover:bg-blue-500"
-              >
-                Manage Settings
-              </button>
-              <p className="text-gray-500 text-sm mt-1">
-                Manage profile, bookings, and coupons.
-              </p>
-            </div>
           </div>
         </div>
       </div>
@@ -1817,7 +2557,9 @@ useEffect(() => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-semibold mb-2">Price (₱/night)</label>
+                  <label className="block text-sm font-semibold mb-2">
+                    Price (₱/{newListing.category === 'Home' ? 'night' : newListing.category === 'Service' ? 'session' : 'person'})
+                  </label>
                   <input
                     type="number"
                     value={newListing.price}
@@ -1886,39 +2628,108 @@ useEffect(() => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold mb-2">Max Guests</label>
-                  <input
-                    type="number"
-                    value={newListing.maxGuests}
-                    onChange={(e) => setNewListing({...newListing, maxGuests: parseInt(e.target.value)})}
-                    className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
-                    min="1"
-                    max="20"
-                  />
+              {/* Conditional Fields Based on Category */}
+              {newListing.category === 'Home' && (
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Max Guests</label>
+                    <input
+                      type="number"
+                      value={newListing.maxGuests}
+                      onChange={(e) => setNewListing({...newListing, maxGuests: parseInt(e.target.value)})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      min="1"
+                      max="20"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Bedrooms</label>
+                    <input
+                      type="number"
+                      value={newListing.bedrooms}
+                      onChange={(e) => setNewListing({...newListing, bedrooms: parseInt(e.target.value)})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      min="1"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Bathrooms</label>
+                    <input
+                      type="number"
+                      value={newListing.bathrooms}
+                      onChange={(e) => setNewListing({...newListing, bathrooms: parseInt(e.target.value)})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      min="1"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-sm font-semibold mb-2">Bedrooms</label>
-                  <input
-                    type="number"
-                    value={newListing.bedrooms}
-                    onChange={(e) => setNewListing({...newListing, bedrooms: parseInt(e.target.value)})}
-                    className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
-                    min="1"
-                  />
+              )}
+
+              {newListing.category === 'Service' && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Service Type</label>
+                    <input
+                      type="text"
+                      value={newListing.serviceType || ''}
+                      onChange={(e) => setNewListing({...newListing, serviceType: e.target.value})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      placeholder="e.g., Cleaning, Repair, Consultation"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Duration (hours)</label>
+                    <input
+                      type="number"
+                      value={newListing.duration || ''}
+                      onChange={(e) => setNewListing({...newListing, duration: e.target.value})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      placeholder="e.g., 2"
+                      min="0.5"
+                      step="0.5"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-sm font-semibold mb-2">Bathrooms</label>
-                  <input
-                    type="number"
-                    value={newListing.bathrooms}
-                    onChange={(e) => setNewListing({...newListing, bathrooms: parseInt(e.target.value)})}
-                    className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
-                    min="1"
-                  />
+              )}
+
+              {newListing.category === 'Experience' && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-semibold mb-2">Group Size (max)</label>
+                      <input
+                        type="number"
+                        value={newListing.groupSize || ''}
+                        onChange={(e) => setNewListing({...newListing, groupSize: parseInt(e.target.value)})}
+                        className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                        placeholder="e.g., 10"
+                        min="1"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold mb-2">Duration (hours)</label>
+                      <input
+                        type="number"
+                        value={newListing.duration || ''}
+                        onChange={(e) => setNewListing({...newListing, duration: e.target.value})}
+                        className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                        placeholder="e.g., 3"
+                        min="0.5"
+                        step="0.5"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">What's Included</label>
+                    <textarea
+                      value={newListing.whatsIncluded || ''}
+                      onChange={(e) => setNewListing({...newListing, whatsIncluded: e.target.value})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500 h-20 resize-none"
+                      placeholder="e.g., Equipment, Guide, Meals, Photos"
+                    />
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div>
                 <label className="block text-sm font-semibold mb-2">Description</label>
@@ -1930,17 +2741,26 @@ useEffect(() => {
                 />
               </div>
 
+              {/* Amenities/Features - Different for each category */}
               <div>
-                <label className="block text-sm font-semibold mb-2">Amenities</label>
+                <label className="block text-sm font-semibold mb-2">
+                  {newListing.category === 'Home' ? 'Amenities' : newListing.category === 'Service' ? 'Service Features' : 'Experience Highlights'}
+                </label>
                 <div className="space-y-2">
                   <textarea
                     value={Array.isArray(newListing.amenities) ? newListing.amenities.join(', ') : ''}
                     onChange={(e) => setNewListing({...newListing, amenities: e.target.value.split(',').map(item => item.trim())})}
                     className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500 h-24 resize-none"
-                    placeholder="Enter amenities separated by commas (e.g., Wifi, Parking, Kitchen, AC)"
+                    placeholder={
+                      newListing.category === 'Home' 
+                        ? "Enter amenities separated by commas (e.g., Wifi, Parking, Kitchen, AC)"
+                        : newListing.category === 'Service'
+                        ? "Enter service features separated by commas (e.g., Professional, Insured, Same-day Available)"
+                        : "Enter highlights separated by commas (e.g., Expert Guide, Photos Included, All Equipment Provided)"
+                    }
                   />
                   <div className="flex flex-wrap gap-2">
-                    {['Wifi', 'Parking', 'Kitchen', 'AC', 'TV', 'Pool', 'Gym', 'Beach Access', 'Hot Tub', 'BBQ'].map((amenity) => (
+                    {newListing.category === 'Home' && ['Wifi', 'Parking', 'Kitchen', 'AC', 'TV', 'Pool', 'Gym', 'Beach Access', 'Hot Tub', 'BBQ'].map((amenity) => (
                       <button
                         key={amenity}
                         type="button"
@@ -1953,6 +2773,36 @@ useEffect(() => {
                         className="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 rounded-full text-gray-700"
                       >
                         + {amenity}
+                      </button>
+                    ))}
+                    {newListing.category === 'Service' && ['Professional', 'Insured', 'Licensed', 'Same-day Available', '24/7 Support', 'Free Consultation', 'Satisfaction Guaranteed'].map((feature) => (
+                      <button
+                        key={feature}
+                        type="button"
+                        onClick={() => {
+                          const currentAmenities = Array.isArray(newListing.amenities) ? newListing.amenities : [];
+                          if (!currentAmenities.includes(feature)) {
+                            setNewListing({...newListing, amenities: [...currentAmenities, feature]});
+                          }
+                        }}
+                        className="px-3 py-1 text-sm bg-blue-100 hover:bg-blue-200 rounded-full text-blue-700"
+                      >
+                        + {feature}
+                      </button>
+                    ))}
+                    {newListing.category === 'Experience' && ['Expert Guide', 'All Equipment', 'Photos Included', 'Meals Provided', 'Hotel Pickup', 'Small Group', 'Beginner Friendly'].map((highlight) => (
+                      <button
+                        key={highlight}
+                        type="button"
+                        onClick={() => {
+                          const currentAmenities = Array.isArray(newListing.amenities) ? newListing.amenities : [];
+                          if (!currentAmenities.includes(highlight)) {
+                            setNewListing({...newListing, amenities: [...currentAmenities, highlight]});
+                          }
+                        }}
+                        className="px-3 py-1 text-sm bg-green-100 hover:bg-green-200 rounded-full text-green-700"
+                      >
+                        + {highlight}
                       </button>
                     ))}
                   </div>
@@ -2022,7 +2872,9 @@ useEffect(() => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-semibold mb-2">Price (₱/night)</label>
+                  <label className="block text-sm font-semibold mb-2">
+                    Price (₱/{newListing.category === 'Home' ? 'night' : newListing.category === 'Service' ? 'session' : 'person'})
+                  </label>
                   <input
                     type="number"
                     value={newListing.price}
@@ -2092,39 +2944,108 @@ useEffect(() => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold mb-2">Max Guests</label>
-                  <input
-                    type="number"
-                    value={newListing.maxGuests}
-                    onChange={(e) => setNewListing({...newListing, maxGuests: parseInt(e.target.value)})}
-                    className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
-                    min="1"
-                    max="20"
-                  />
+              {/* Conditional Fields Based on Category */}
+              {newListing.category === 'Home' && (
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Max Guests</label>
+                    <input
+                      type="number"
+                      value={newListing.maxGuests}
+                      onChange={(e) => setNewListing({...newListing, maxGuests: parseInt(e.target.value)})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      min="1"
+                      max="20"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Bedrooms</label>
+                    <input
+                      type="number"
+                      value={newListing.bedrooms}
+                      onChange={(e) => setNewListing({...newListing, bedrooms: parseInt(e.target.value)})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      min="1"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Bathrooms</label>
+                    <input
+                      type="number"
+                      value={newListing.bathrooms}
+                      onChange={(e) => setNewListing({...newListing, bathrooms: parseInt(e.target.value)})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      min="1"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-sm font-semibold mb-2">Bedrooms</label>
-                  <input
-                    type="number"
-                    value={newListing.bedrooms}
-                    onChange={(e) => setNewListing({...newListing, bedrooms: parseInt(e.target.value)})}
-                    className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
-                    min="1"
-                  />
+              )}
+
+              {newListing.category === 'Service' && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Service Type</label>
+                    <input
+                      type="text"
+                      value={newListing.serviceType || ''}
+                      onChange={(e) => setNewListing({...newListing, serviceType: e.target.value})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      placeholder="e.g., Cleaning, Repair, Consultation"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">Duration (hours)</label>
+                    <input
+                      type="number"
+                      value={newListing.duration || ''}
+                      onChange={(e) => setNewListing({...newListing, duration: e.target.value})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      placeholder="e.g., 2"
+                      min="0.5"
+                      step="0.5"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-sm font-semibold mb-2">Bathrooms</label>
-                  <input
-                    type="number"
-                    value={newListing.bathrooms}
-                    onChange={(e) => setNewListing({...newListing, bathrooms: parseInt(e.target.value)})}
-                    className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
-                    min="1"
-                  />
+              )}
+
+              {newListing.category === 'Experience' && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-semibold mb-2">Group Size (max)</label>
+                      <input
+                        type="number"
+                        value={newListing.groupSize || ''}
+                        onChange={(e) => setNewListing({...newListing, groupSize: parseInt(e.target.value)})}
+                        className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                        placeholder="e.g., 10"
+                        min="1"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold mb-2">Duration (hours)</label>
+                      <input
+                        type="number"
+                        value={newListing.duration || ''}
+                        onChange={(e) => setNewListing({...newListing, duration: e.target.value})}
+                        className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                        placeholder="e.g., 3"
+                        min="0.5"
+                        step="0.5"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-2">What's Included</label>
+                    <textarea
+                      value={newListing.whatsIncluded || ''}
+                      onChange={(e) => setNewListing({...newListing, whatsIncluded: e.target.value})}
+                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500 h-20 resize-none"
+                      placeholder="e.g., Equipment, Guide, Meals, Photos"
+                    />
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div>
                 <label className="block text-sm font-semibold mb-2">Description</label>
@@ -2136,17 +3057,26 @@ useEffect(() => {
                 />
               </div>
 
+              {/* Amenities/Features - Different for each category */}
               <div>
-                <label className="block text-sm font-semibold mb-2">Amenities</label>
+                <label className="block text-sm font-semibold mb-2">
+                  {newListing.category === 'Home' ? 'Amenities' : newListing.category === 'Service' ? 'Service Features' : 'Experience Highlights'}
+                </label>
                 <div className="space-y-2">
                   <textarea
                     value={Array.isArray(newListing.amenities) ? newListing.amenities.join(', ') : ''}
                     onChange={(e) => setNewListing({...newListing, amenities: e.target.value.split(',').map(item => item.trim())})}
                     className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500 h-24 resize-none"
-                    placeholder="Enter amenities separated by commas (e.g., Wifi, Parking, Kitchen, AC)"
+                    placeholder={
+                      newListing.category === 'Home' 
+                        ? "Enter amenities separated by commas (e.g., Wifi, Parking, Kitchen, AC)"
+                        : newListing.category === 'Service'
+                        ? "Enter service features separated by commas (e.g., Professional, Insured, Same-day Available)"
+                        : "Enter highlights separated by commas (e.g., Expert Guide, Photos Included, All Equipment Provided)"
+                    }
                   />
                   <div className="flex flex-wrap gap-2">
-                    {['Wifi', 'Parking', 'Kitchen', 'AC', 'TV', 'Pool', 'Gym', 'Beach Access', 'Hot Tub', 'BBQ'].map((amenity) => (
+                    {newListing.category === 'Home' && ['Wifi', 'Parking', 'Kitchen', 'AC', 'TV', 'Pool', 'Gym', 'Beach Access', 'Hot Tub', 'BBQ'].map((amenity) => (
                       <button
                         key={amenity}
                         type="button"
@@ -2159,6 +3089,36 @@ useEffect(() => {
                         className="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 rounded-full text-gray-700"
                       >
                         + {amenity}
+                      </button>
+                    ))}
+                    {newListing.category === 'Service' && ['Professional', 'Insured', 'Licensed', 'Same-day Available', '24/7 Support', 'Free Consultation', 'Satisfaction Guaranteed'].map((feature) => (
+                      <button
+                        key={feature}
+                        type="button"
+                        onClick={() => {
+                          const currentAmenities = Array.isArray(newListing.amenities) ? newListing.amenities : [];
+                          if (!currentAmenities.includes(feature)) {
+                            setNewListing({...newListing, amenities: [...currentAmenities, feature]});
+                          }
+                        }}
+                        className="px-3 py-1 text-sm bg-blue-100 hover:bg-blue-200 rounded-full text-blue-700"
+                      >
+                        + {feature}
+                      </button>
+                    ))}
+                    {newListing.category === 'Experience' && ['Expert Guide', 'All Equipment', 'Photos Included', 'Meals Provided', 'Hotel Pickup', 'Small Group', 'Beginner Friendly'].map((highlight) => (
+                      <button
+                        key={highlight}
+                        type="button"
+                        onClick={() => {
+                          const currentAmenities = Array.isArray(newListing.amenities) ? newListing.amenities : [];
+                          if (!currentAmenities.includes(highlight)) {
+                            setNewListing({...newListing, amenities: [...currentAmenities, highlight]});
+                          }
+                        }}
+                        className="px-3 py-1 text-sm bg-green-100 hover:bg-green-200 rounded-full text-green-700"
+                      >
+                        + {highlight}
                       </button>
                     ))}
                   </div>
@@ -2362,7 +3322,8 @@ useEffect(() => {
                   <div><strong>Current Points:</strong> {hostPoints.toLocaleString()}</div>
                   <div><strong>Available Coupons:</strong> {coupons.length}</div>
                   <div><strong>Total Earnings:</strong> ₱{dashboard.totalEarnings.toLocaleString()}</div>
-                  <div><strong>Level:</strong> Super Host</div>
+                  <div><strong>Level:</strong> {hostLevel}</div>
+                  <div><strong>Total Bookings:</strong> {dashboard.totalBookings || 0}</div>
                 </div>
               </div>
 
@@ -2468,56 +3429,6 @@ useEffect(() => {
                   <p className="text-sm">Keep providing great service to earn reviews!</p>
                 </div>
               )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* PayPal Payment Modal */}
-      {showPayPalPayment && (
-        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-start justify-center z-50 overflow-y-auto py-8">
-          <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-md relative my-auto">
-            <button
-              onClick={() => setShowPayPalPayment(false)}
-              className="sticky top-2 right-4 float-right text-xl text-gray-400 hover:text-blue-500"
-            >
-              ×
-            </button>
-            
-            <div className="text-center mb-6">
-              <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <FaCreditCard className="text-2xl text-blue-500" />
-              </div>
-              <h3 className="text-xl font-bold">PayPal Payment</h3>
-              <p className="text-gray-500">Complete your payment securely</p>
-              <div className="text-2xl font-bold text-blue-600 mt-2">₱{paymentAmount.toLocaleString()}</div>
-            </div>
-
-            <div className="mb-6">
-              <div className="bg-gray-50 rounded-lg p-4 mb-4">
-                <div className="text-sm text-gray-600 mb-2">Payment Details</div>
-                <div className="flex justify-between">
-                  <span>Amount:</span>
-                  <span className="font-semibold">₱{paymentAmount.toLocaleString()}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Currency:</span>
-                  <span className="font-semibold">PHP</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Method:</span>
-                  <span className="font-semibold">PayPal</span>
-                </div>
-              </div>
-            </div>
-
-            {/* PayPal Button Container */}
-            <div id="paypal-button-container" className="mb-4"></div>
-
-            <div className="text-center">
-              <p className="text-xs text-gray-400">
-                Secure payment powered by PayPal
-              </p>
             </div>
           </div>
         </div>

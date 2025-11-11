@@ -29,19 +29,31 @@ export async function createBookingTransaction(db, bookingInput) {
     const hostListingRef = doc(db, "hostListings", bookingInput.listingId);
     const hostSnap = await tx.get(hostListingRef);
     if (hostSnap.exists()) {
+      const currentBookings = (hostSnap.data().bookingsCount || 0) + 1;
+      let calendarText = "Available";
+      if (currentBookings >= 20) calendarText = "Limited availability";
+      else if (currentBookings >= 10) calendarText = "Few slots left";
+      else if (currentBookings >= 5) calendarText = "Booking fast";
+      
       tx.update(hostListingRef, {
         bookingsCount: increment(1),
         lastBooked: serverTimestamp(),
-        calendar: "Few slots"
+        calendar: calendarText
       });
     } else {
       const listingRef = doc(db, "listings", bookingInput.listingId);
       const listSnap = await tx.get(listingRef);
       if (listSnap.exists()) {
+        const currentBookings = (listSnap.data().bookingsCount || 0) + 1;
+        let calendarText = "Available";
+        if (currentBookings >= 20) calendarText = "Limited availability";
+        else if (currentBookings >= 10) calendarText = "Few slots left";
+        else if (currentBookings >= 5) calendarText = "Booking fast";
+        
         tx.update(listingRef, {
           bookingsCount: increment(1),
           lastBooked: serverTimestamp(),
-          calendar: "Few slots"
+          calendar: calendarText
         });
       }
     }
@@ -97,31 +109,89 @@ export async function approveBookingTransaction(db, bookingId) {
     });
 
     if (hostSnap.exists()) {
+      const currentBookings = (hostSnap.data().bookingsCount || 0) + 1;
+      let calendarText = "Available";
+      if (currentBookings >= 20) calendarText = "Limited availability";
+      else if (currentBookings >= 10) calendarText = "Few slots left";
+      else if (currentBookings >= 5) calendarText = "Booking fast";
+      
       tx.update(hostListingRef, {
         bookingsCount: increment(1),
         lastBooked: serverTimestamp(),
-        calendar: "Few slots"
+        calendar: calendarText
       });
     } else if (publicSnap && publicSnap.exists()) {
+      const currentBookings = (publicSnap.data().bookingsCount || 0) + 1;
+      let calendarText = "Available";
+      if (currentBookings >= 20) calendarText = "Limited availability";
+      else if (currentBookings >= 10) calendarText = "Few slots left";
+      else if (currentBookings >= 5) calendarText = "Booking fast";
+      
       tx.update(publicRef, {
         bookingsCount: increment(1),
         lastBooked: serverTimestamp(),
-        calendar: "Few slots"
+        calendar: calendarText
       });
     }
 
     return { ...booking, status: "Upcoming" };
   });
 
-  // Outside the tx: credit host earnings (dashboard metrics)
+  // Outside the tx: credit host earnings (dashboard metrics) with 5% admin commission
   try {
     const snap = await getDoc(doc(db, "bookings", bookingId));
     const booking = snap.data();
     if (booking?.hostId && booking?.total) {
-      await incrementDashboardMetrics(booking.hostId, "totalEarnings", booking.total);
-      await incrementDashboardMetrics(booking.hostId, "monthlyRevenue", booking.total);
+      const totalAmount = booking.total;
+      const adminCommission = totalAmount * 0.05; // 5% for admin
+      const hostEarnings = totalAmount * 0.95; // 95% for host
+      
+      // Update host earnings (95%)
+      await incrementDashboardMetrics(booking.hostId, "totalEarnings", hostEarnings);
+      await incrementDashboardMetrics(booking.hostId, "monthlyRevenue", hostEarnings);
+      await incrementDashboardMetrics(booking.hostId, "totalBookings", 1);
+      
+      // Update admin wallet (5%)
+      const adminWalletRef = doc(db, "adminWallet", "earnings");
+      const adminWalletSnap = await getDoc(adminWalletRef);
+      
+      if (adminWalletSnap.exists()) {
+        const currentBalance = adminWalletSnap.data().balance || 0;
+        const currentTotalEarnings = adminWalletSnap.data().totalEarnings || 0;
+        await runTransaction(db, async (tx) => {
+          tx.update(adminWalletRef, {
+            balance: currentBalance + adminCommission,
+            totalEarnings: currentTotalEarnings + adminCommission,
+            lastUpdated: serverTimestamp()
+          });
+        });
+      } else {
+        await runTransaction(db, async (tx) => {
+          tx.set(adminWalletRef, {
+            balance: adminCommission,
+            totalEarnings: adminCommission,
+            createdAt: serverTimestamp(),
+            lastUpdated: serverTimestamp()
+          });
+        });
+      }
+      
+      // Add transaction record for admin
+      const adminTransactionRef = doc(collection(db, "adminTransactions"));
+      await runTransaction(db, async (tx) => {
+        tx.set(adminTransactionRef, {
+          type: 'commission',
+          amount: adminCommission,
+          bookingId: bookingId,
+          hostId: booking.hostId,
+          description: `5% commission from booking: ${booking.title || 'Booking'}`,
+          date: serverTimestamp(),
+          status: 'completed'
+        });
+      });
     }
   } catch (e) {
+    console.error("Error crediting earnings:", e);
     // best effort; avoid failing approval when metrics crediting fails
   }
 

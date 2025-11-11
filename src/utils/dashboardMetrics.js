@@ -13,12 +13,13 @@ export const initializeDashboardMetrics = async (hostId) => {
         monthlyRevenue: 0,
         todayBookings: 0,
         upcomingBookings: 0,
-        hostRating: 4.7,
-        averageRating: 4.8,
-        occupancyRate: 87,
-        responseRate: 98,
+        totalBookings: 0,
+        hostRating: 0,
+        averageRating: 0,
+        occupancyRate: 0,
+        responseRate: 0,
         responseTime: "<1hr",
-        cancellationRate: 3,
+        cancellationRate: 0,
         lastUpdated: new Date().toISOString(),
       });
     }

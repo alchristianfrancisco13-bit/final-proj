@@ -17,7 +17,7 @@ import {
 import { saveAs } from "file-saver";
 import { signOut } from "firebase/auth";
 import { auth, db } from "./firebase";
-import { doc, setDoc, getDoc } from "firebase/firestore";
+import { doc, setDoc, getDoc, onSnapshot, collection, query, orderBy, limit } from "firebase/firestore";
 
 function AdminPage({ onLogout }) {
   useEffect(() => {
@@ -34,10 +34,43 @@ function AdminPage({ onLogout }) {
       }
     };
     fetchPolicy();
+
+    // Real-time listener for admin wallet
+    const adminWalletRef = doc(db, "adminWallet", "earnings");
+    const unsubWallet = onSnapshot(adminWalletRef, (doc) => {
+      if (doc.exists()) {
+        const data = doc.data();
+        setAdminWallet({
+          balance: data.balance || 0,
+          totalEarnings: data.totalEarnings || 0
+        });
+      }
+    });
+
+    // Real-time listener for admin transactions
+    const transactionsRef = collection(db, "adminTransactions");
+    const transactionsQuery = query(transactionsRef, orderBy("date", "desc"), limit(10));
+    const unsubTransactions = onSnapshot(transactionsQuery, (snapshot) => {
+      const transactions = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setAdminTransactions(transactions);
+    });
+
+    return () => {
+      unsubWallet();
+      unsubTransactions();
+    };
   }, []);
 
   // States
   const [serviceFee, setServiceFee] = useState(10);
+  const [adminWallet, setAdminWallet] = useState({
+    balance: 0,
+    totalEarnings: 0
+  });
+  const [adminTransactions, setAdminTransactions] = useState([]);
   const [report, setReport] = useState("");
   const [payments, setPayments] = useState([
     { id: "P-001", user: "Juan Dela Cruz", amount: 2500, status: "Pending" },
@@ -208,6 +241,30 @@ function AdminPage({ onLogout }) {
           </div>
         </div>
 
+        {/* Admin Wallet Card */}
+        <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl shadow-lg p-8 text-white mb-8">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <p className="text-green-100 text-sm font-medium mb-2">Admin Wallet Balance</p>
+              <h3 className="text-4xl font-bold">₱{adminWallet.balance.toLocaleString()}</h3>
+            </div>
+            <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center">
+              <FaMoneyBillWave className="text-3xl" />
+            </div>
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-white/10 rounded-lg p-3">
+              <p className="text-green-100 text-xs mb-1">Total Earnings (5% Commission)</p>
+              <p className="text-xl font-bold">₱{adminWallet.totalEarnings.toLocaleString()}</p>
+            </div>
+            <div className="bg-white/10 rounded-lg p-3">
+              <p className="text-green-100 text-xs mb-1">Recent Transactions</p>
+              <p className="text-xl font-bold">{adminTransactions.length}</p>
+            </div>
+          </div>
+        </div>
+
         {/* Analytics Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
           <div className="bg-white rounded-xl shadow p-6 flex items-center gap-4">
@@ -356,6 +413,49 @@ function AdminPage({ onLogout }) {
               </button>
               <p className="text-gray-500 text-sm mt-1">
                 View best reviews, lowest reviews, list of bookings, etc.
+              </p>
+            </div>
+
+            {/* Admin Commission Transactions */}
+            <div className="bg-white rounded-xl shadow p-6">
+              <div className="flex items-center gap-2 mb-3">
+                <FaMoneyBillWave className="text-xl text-green-400" />
+                <span className="font-semibold text-lg">Commission Transactions</span>
+              </div>
+              <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                <table className="min-w-full text-sm">
+                  <thead className="sticky top-0 bg-green-100">
+                    <tr>
+                      <th className="px-2 py-1 text-left">Date</th>
+                      <th className="px-2 py-1 text-left">Description</th>
+                      <th className="px-2 py-1 text-left">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {adminTransactions.length > 0 ? (
+                      adminTransactions.map((t) => (
+                        <tr key={t.id} className="border-b">
+                          <td className="px-2 py-1">
+                            {t.date?.toDate ? new Date(t.date.toDate()).toLocaleDateString() : 'N/A'}
+                          </td>
+                          <td className="px-2 py-1 text-xs">{t.description}</td>
+                          <td className="px-2 py-1 text-green-600 font-bold">
+                            +₱{t.amount?.toLocaleString()}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan="3" className="px-2 py-4 text-center text-gray-500">
+                          No transactions yet
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-gray-500 text-sm mt-1">
+                5% commission from each approved booking
               </p>
             </div>
 

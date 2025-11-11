@@ -58,6 +58,49 @@ function GuestPage({ onLogout }) {
     loadTransactions();
   }, []);
 
+  // Load guest coupons/rewards from Firestore
+  useEffect(() => {
+    const loadCoupons = async () => {
+      const userId = auth.currentUser?.uid;
+      if (!userId) {
+        console.log('No user logged in, skipping coupon load');
+        return;
+      }
+
+      try {
+        console.log('Loading coupons for user:', userId);
+        const rewardsRef = collection(db, "guestRewards");
+        const q = query(
+          rewardsRef,
+          where("guestId", "==", userId),
+          where("isUsed", "==", false)
+        );
+        const querySnapshot = await getDocs(q);
+        console.log('Query returned', querySnapshot.size, 'documents');
+        
+        const loadedCoupons = querySnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        
+        // Filter out expired coupons and sort by given date
+        const validCoupons = loadedCoupons
+          .filter(coupon => new Date(coupon.validUntil) > new Date())
+          .sort((a, b) => new Date(b.givenAt) - new Date(a.givenAt));
+        
+        setMyCoupons(validCoupons);
+        console.log('✅ Loaded coupons:', validCoupons.length, validCoupons);
+      } catch (error) {
+        console.error('❌ Error loading coupons:', error);
+        console.error('Full error details:', error.message);
+      }
+    };
+
+    // Add slight delay to ensure auth is ready
+    const timer = setTimeout(loadCoupons, 500);
+    return () => clearTimeout(timer);
+  }, [auth.currentUser]);
+
   // Load user profile from Firestore
   useEffect(() => {
     const loadUserProfile = async () => {
@@ -367,6 +410,12 @@ function GuestPage({ onLogout }) {
   const [emailChangeError, setEmailChangeError] = useState("");
   const [emailChangeLoading, setEmailChangeLoading] = useState(false);
 
+  // Coupons & Rewards states
+  const [myCoupons, setMyCoupons] = useState([]);
+  const [showRewardsModal, setShowRewardsModal] = useState(false);
+  const [selectedCoupon, setSelectedCoupon] = useState(null);
+  const [appliedCoupon, setAppliedCoupon] = useState(null);
+
   // Sidebar state
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
@@ -429,18 +478,27 @@ function GuestPage({ onLogout }) {
     }
   };
 
-  // Helper function to safely render reviews/rating
-  const renderReviewsRating = (reviewsOrRating) => {
-    if (Array.isArray(reviewsOrRating)) {
-      return reviewsOrRating.length > 0 ? `${reviewsOrRating.length} reviews` : 'New';
+  // Helper function to safely render reviews/rating - shows actual rating and review count
+  const renderReviewsRating = (listing) => {
+    // If it's a listing object with rating and numReviews
+    if (typeof listing === 'object' && listing !== null && !Array.isArray(listing)) {
+      const rating = listing.rating || 0;
+      const numReviews = listing.numReviews || 0;
+      
+      if (numReviews > 0 && rating > 0) {
+        return `${rating.toFixed(1)} (${numReviews} ${numReviews === 1 ? 'review' : 'reviews'})`;
+      }
+      return 'New listing';
     }
-    if (typeof reviewsOrRating === 'number') {
-      return reviewsOrRating.toFixed ? reviewsOrRating.toFixed(1) : reviewsOrRating;
+    
+    // Legacy support for direct values
+    if (Array.isArray(listing)) {
+      return listing.length > 0 ? `${listing.length} ${listing.length === 1 ? 'review' : 'reviews'}` : 'New listing';
     }
-    if (typeof reviewsOrRating === 'object' && reviewsOrRating !== null) {
-      return 'New';
+    if (typeof listing === 'number') {
+      return listing > 0 ? listing.toFixed(1) : 'New listing';
     }
-    return 'New';
+    return 'New listing';
   };
 
   // Star rating component
@@ -1122,7 +1180,50 @@ useEffect(() => {
     const checkOut = new Date(bookingDates.checkOut);
     const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
     
+    const subtotal = nights * selectedListing.pricePerNight;
+    
+    // Apply coupon discount if available
+    if (appliedCoupon) {
+      const discount = (subtotal * appliedCoupon.discount) / 100;
+      return subtotal - discount;
+    }
+    
+    return subtotal;
+  };
+
+  const calculateSubtotal = () => {
+    if (!selectedListing || !bookingDates.checkIn || !bookingDates.checkOut) return 0;
+    
+    const checkIn = new Date(bookingDates.checkIn);
+    const checkOut = new Date(bookingDates.checkOut);
+    const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+    
     return nights * selectedListing.pricePerNight;
+  };
+
+  const calculateDiscount = () => {
+    if (!appliedCoupon) return 0;
+    const subtotal = calculateSubtotal();
+    return (subtotal * appliedCoupon.discount) / 100;
+  };
+
+  const handleApplyCoupon = (coupon) => {
+    setAppliedCoupon(coupon);
+    setShowRewardsModal(false);
+    
+    // Calculate potential savings
+    const subtotal = calculateSubtotal();
+    const discount = (subtotal * coupon.discount) / 100;
+    
+    if (subtotal > 0) {
+      alert(`Coupon applied! You'll save ₱${discount.toLocaleString()} (${coupon.discount}% off)`);
+    } else {
+      alert(`Coupon "${coupon.couponName}" applied! ${coupon.discount}% discount will be calculated at checkout.`);
+    }
+  };
+
+  const handleRemoveCoupon = () => {
+    setAppliedCoupon(null);
   };
 
   const handleConfirmBooking = async () => {
@@ -1612,6 +1713,14 @@ useEffect(() => {
         guests: bookingGuests,
         notes: bookingNotes || "",
         total: total,
+        subtotal: calculateSubtotal(),
+        discount: calculateDiscount(),
+        couponApplied: appliedCoupon ? {
+          id: appliedCoupon.id,
+          code: appliedCoupon.couponCode,
+          name: appliedCoupon.couponName,
+          discount: appliedCoupon.discount
+        } : null,
         paymentMethod: 'PayPal',
         paymentStatus: 'paid', // Payment already completed
         transactionId: transactionId,
@@ -1637,6 +1746,24 @@ useEffect(() => {
       await updateDoc(newBookingRef, {
         id: newBookingRef.id
       });
+
+      // Mark coupon as used if applied
+      if (appliedCoupon) {
+        try {
+          await updateDoc(doc(db, "guestRewards", appliedCoupon.id), {
+            isUsed: true,
+            usedAt: serverTimestamp(),
+            usedForBooking: newBookingRef.id
+          });
+          console.log("Coupon marked as used");
+          
+          // Remove from myCoupons list
+          setMyCoupons(prev => prev.filter(c => c.id !== appliedCoupon.id));
+          setAppliedCoupon(null);
+        } catch (error) {
+          console.error("Error marking coupon as used:", error);
+        }
+      }
 
       console.log("✅ Booking submitted for host approval with payment completed");
       
@@ -1789,65 +1916,117 @@ useEffect(() => {
     }
   }, [showPayPalTopUpPayment, topUpAmount]);
 
-  // Enhanced suggestions based on booking history
+  // Enhanced suggestions based on booking history, favorites, and user behavior
   const getEnhancedSuggestions = () => {
     const allListings = getListingsPool(); // Use full pool, not filtered searchResults
     
-    // Get categories from valid bookings
-    const bookedCategories = bookings.map(b => {
-      // Safely find the listing using the ID pattern
-      const listingId = b.listingId || (b.id ? b.id.split('-')[1] : null);
-      if (!listingId) return null;
-      
-      // Look for the listing in full pool
-      const listing = allListings.find(l => l.id === listingId);
-      return listing ? listing.category : null;
-    }).filter(Boolean); // Remove nulls
+    if (allListings.length === 0) return []; // No listings available
+    
+    // Get booked listing IDs for exclusion
+    const bookedListingIds = bookings.map(b => b.listingId).filter(Boolean);
+    const favoriteListingIds = favorites.map(f => f.id).filter(Boolean);
+    
+    // Get categories from bookings
+    const bookedCategories = bookings
+      .map(b => {
+        const listing = allListings.find(l => l.id === b.listingId);
+        return listing?.category;
+      })
+      .filter(Boolean);
     
     // Get categories from favorites
     const favoriteCategories = favorites
       .map(f => f.category)
-      .filter(Boolean); // Remove undefined categories
+      .filter(Boolean);
     
-    // Get most preferred category
-    const categoryCount = {};
-    [...bookedCategories, ...favoriteCategories].forEach(cat => {
-      if (cat) { // Only count valid categories
-        categoryCount[cat] = (categoryCount[cat] || 0) + 1;
-      }
+    // Count category preferences (weighted: bookings = 2x, favorites = 1x)
+    const categoryScores = {};
+    bookedCategories.forEach(cat => {
+      categoryScores[cat] = (categoryScores[cat] || 0) + 2;
+    });
+    favoriteCategories.forEach(cat => {
+      categoryScores[cat] = (categoryScores[cat] || 0) + 1;
     });
     
-    // Get preferred category or default to "All"
-    const preferredCategory = Object.keys(categoryCount).length > 0
-      ? Object.keys(categoryCount).reduce((a, b) => 
-          categoryCount[a] > categoryCount[b] ? a : b)
-      : "All";
+    // Get preferred categories (top 2)
+    const preferredCategories = Object.entries(categoryScores)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 2)
+      .map(([cat]) => cat);
     
-    // Get suggestions from full pool based on preferences (not filtered by current category)
-    const suggestions = allListings.filter(listing => {
-      if (!listing || !listing.id) return false; // Skip invalid listings
-      
-      // Check if not already booked
-      const notBooked = !bookings.some(b => 
-        b.listingId === listing.id || 
-        (b.id && listing.id === b.id.split('-')[1])
-      );
-      
-      // Check if not already favorited
-      const notFavorited = !favorites.some(f => f.id === listing.id);
-      
-      // Check if matches preferred category or random selection
-      const matchesPreference = preferredCategory === "All" ||
-        listing.category === preferredCategory ||
-        Math.random() > 0.7;
-      
-      return notBooked && notFavorited && matchesPreference;
-    });
+    // Get average price range from bookings
+    const bookedPrices = bookings
+      .map(b => {
+        const listing = allListings.find(l => l.id === b.listingId);
+        return listing?.price || listing?.pricePerNight;
+      })
+      .filter(p => p && p > 0);
     
-    // Return top 3 random suggestions
-    return suggestions
-      .sort(() => Math.random() - 0.5) // Shuffle
-      .slice(0, 3);
+    const avgPrice = bookedPrices.length > 0
+      ? bookedPrices.reduce((sum, p) => sum + p, 0) / bookedPrices.length
+      : 0;
+    
+    // Get locations from bookings
+    const bookedLocations = bookings
+      .map(b => {
+        const listing = allListings.find(l => l.id === b.listingId);
+        return listing?.location;
+      })
+      .filter(Boolean);
+    
+    // Filter and score suggestions
+    const scoredListings = allListings
+      .filter(listing => {
+        if (!listing || !listing.id) return false;
+        // Exclude already booked or favorited
+        if (bookedListingIds.includes(listing.id)) return false;
+        if (favoriteListingIds.includes(listing.id)) return false;
+        // Only show active listings
+        if (listing.status !== "Active") return false;
+        return true;
+      })
+      .map(listing => {
+        let score = 0;
+        
+        // Category match (highest priority)
+        if (preferredCategories.includes(listing.category)) {
+          score += 100;
+        }
+        
+        // Price similarity (if we have booking history)
+        if (avgPrice > 0) {
+          const listingPrice = listing.price || listing.pricePerNight || 0;
+          const priceDiff = Math.abs(listingPrice - avgPrice);
+          const priceScore = Math.max(0, 50 - (priceDiff / avgPrice) * 50);
+          score += priceScore;
+        }
+        
+        // Same location preference
+        if (bookedLocations.includes(listing.location)) {
+          score += 30;
+        }
+        
+        // High rating bonus
+        if (listing.rating >= 4.5) {
+          score += 20;
+        }
+        
+        // Random factor for variety
+        score += Math.random() * 10;
+        
+        return { ...listing, score };
+      })
+      .sort((a, b) => b.score - a.score);
+    
+    // If no bookings/favorites yet, show popular listings (high rating)
+    if (preferredCategories.length === 0 && scoredListings.length > 0) {
+      return scoredListings
+        .sort((a, b) => (b.rating || 0) - (a.rating || 0))
+        .slice(0, 6);
+    }
+    
+    // Return top 6 recommendations
+    return scoredListings.slice(0, 6);
   };
 
   // Save profile and favorites to localStorage, but not bookings (using Firestore for bookings)
@@ -2031,6 +2210,21 @@ useEffect(() => {
                   <div className="flex flex-col items-start">
                     <span className="text-gray-700 font-medium">Transaction History</span>
                     <span className="text-xs text-gray-500">{transactions.length} transactions</span>
+                  </div>
+                </button>
+
+                {/* My Rewards */}
+                <button
+                  onClick={() => {
+                    setShowRewardsModal(true);
+                    setIsSidebarOpen(false);
+                  }}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gradient-to-r hover:from-pink-50 hover:to-purple-50 transition group"
+                >
+                  <FaGift className="text-pink-500 text-xl group-hover:scale-110 transition" />
+                  <div className="flex flex-col items-start">
+                    <span className="text-gray-700 font-medium">My Rewards</span>
+                    <span className="text-xs text-gray-500">{myCoupons.length} available</span>
                   </div>
                 </button>
 
@@ -2856,10 +3050,10 @@ useEffect(() => {
                           <FaShareAlt className="text-gray-400" />
                         </button>
                         <div className="absolute bottom-3 left-3 flex items-center gap-1 text-white bg-black/50 px-2 py-1 rounded-full text-xs">
-                          <FaStar className="text-yellow-300" /> {renderReviewsRating(l.reviews) || renderReviewsRating(l.rating) || "New"}
+                          <FaStar className="text-yellow-300" /> {renderReviewsRating(l)}
                         </div>
-                        <div className="absolute bottom-3 right-3 bg-white/80 text-xs px-2 py-1 rounded-full">
-                          {l.calendar}
+                        <div className="absolute bottom-3 right-3 bg-white/80 text-xs px-2 py-1 rounded-full font-medium">
+                          {l.calendar || 'Available'}
                         </div>
                       </div>
 
@@ -3092,15 +3286,7 @@ useEffect(() => {
                     Check-in: {showBookingDetails.displayCheckIn} • Check-out: {showBookingDetails.displayCheckOut}
                   </div>
                   <div className="flex items-center gap-1 text-yellow-500 text-xs">
-                    <FaStar /> {
-                      Array.isArray(showBookingDetails.reviews)
-                        ? `${showBookingDetails.reviews.length} reviews`
-                        : typeof showBookingDetails.reviews === 'number'
-                          ? (showBookingDetails.reviews.toFixed ? showBookingDetails.reviews.toFixed(1) : showBookingDetails.reviews)
-                          : (showBookingDetails.rating && showBookingDetails.rating.toFixed
-                              ? showBookingDetails.rating.toFixed(1)
-                              : 'No ratings')
-                    }
+                    <FaStar /> {renderReviewsRating(showBookingDetails)}
                   </div>
                 </div>
                 </div>
@@ -3404,27 +3590,64 @@ useEffect(() => {
 
         {/* Enhanced Suggestions & Recommendations */}
         <div className="mt-10">
-          <div className="flex items-center justify-between mb-4">
-            <div className="font-bold text-lg text-gold-700 flex items-center gap-2">
-              <FaGift className="text-gold-500" />
-              Suggestions & Recommendations for You
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h3 className="font-bold text-2xl text-gray-800 flex items-center gap-2">
+                <FaGift className="text-yellow-500" />
+                Personalized Recommendations
+              </h3>
+              <p className="text-sm text-gray-500 mt-1">
+                {bookings.length > 0 || favorites.length > 0 
+                  ? "Based on your bookings and favorites" 
+                  : "Popular listings you might like"}
+              </p>
             </div>
-            <div className="text-sm text-gray-500">
-              Based on your preferences
+            <div className="text-sm bg-yellow-50 text-yellow-700 px-3 py-1 rounded-full">
+              {getEnhancedSuggestions().length} suggestions
             </div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
             {getEnhancedSuggestions().length === 0 && (
-              <div className="col-span-3 text-center py-8">
-                <FaThumbsUp className="text-4xl text-gray-300 mx-auto mb-2" />
-                <div className="text-gray-400">No new suggestions at the moment.</div>
-                <div className="text-sm text-gray-300">Try exploring different categories!</div>
+              <div className="col-span-full text-center py-12 bg-gray-50 rounded-xl">
+                <FaGift className="text-5xl text-gray-300 mx-auto mb-3" />
+                <div className="text-gray-500 font-medium text-lg">No recommendations available yet</div>
+                <div className="text-sm text-gray-400 mt-1">Start booking or adding favorites to get personalized suggestions!</div>
               </div>
             )}
-            {getEnhancedSuggestions().map((s) => (
+            {getEnhancedSuggestions().map((s) => {
+              // Determine recommendation reason
+              const bookedCategories = bookings.map(b => {
+                const listing = getListingsPool().find(l => l.id === b.listingId);
+                return listing?.category;
+              }).filter(Boolean);
+              const favoriteCategories = favorites.map(f => f.category).filter(Boolean);
+              const hasBookingHistory = bookings.length > 0;
+              const hasFavorites = favorites.length > 0;
+              
+              let recommendationBadge = "";
+              let badgeColor = "";
+              
+              if (hasBookingHistory && bookedCategories.includes(s.category)) {
+                recommendationBadge = "Similar to your bookings";
+                badgeColor = "bg-blue-100 text-blue-700";
+              } else if (hasFavorites && favoriteCategories.includes(s.category)) {
+                recommendationBadge = "Matches your favorites";
+                badgeColor = "bg-purple-100 text-purple-700";
+              } else if (s.rating >= 4.5) {
+                recommendationBadge = "Popular choice";
+                badgeColor = "bg-yellow-100 text-yellow-700";
+              } else {
+                recommendationBadge = "You might like";
+                badgeColor = "bg-green-100 text-green-700";
+              }
+              
+              return (
               <div key={s.id} className="bg-white rounded-xl shadow hover:shadow-lg transition p-4 flex flex-col group">
                 <div className="relative mb-3">
                   <img src={s.img} alt={s.title} className="w-full h-48 rounded-lg object-cover" />
+                  <div className={`absolute top-2 left-2 px-2 py-1 rounded-full text-xs font-semibold ${badgeColor}`}>
+                    {recommendationBadge}
+                  </div>
                   <button
                     onClick={() => toggleFavorite(s)}
                     className="absolute top-2 right-2 p-2 rounded-full bg-white/80 hover:bg-white shadow"
@@ -3434,8 +3657,8 @@ useEffect(() => {
                 </div>
                 <div className="font-bold text-center text-lg">{s.title}</div>
                 <div className="text-xs text-gray-400 mb-2 text-center">{s.category} • {s.location}</div>
-                <div className="flex items-center gap-1 text-yellow-500 mb-2 justify-center">
-                  <FaStar /> {renderReviewsRating(s.reviews)}
+                <div className="flex items-center gap-1 text-yellow-500 mb-2 justify-center text-xs">
+                  <FaStar /> {renderReviewsRating(s)}
                 </div>
                 <div className="text-sm text-gray-700 font-semibold mb-3 text-center">₱{s.pricePerNight?.toLocaleString?.()}/night</div>
                 <div className="text-xs text-gray-500 mb-3 text-center">Amenities: {(s.amenities || []).slice(0, 2).join(", ")}</div>
@@ -3454,7 +3677,8 @@ useEffect(() => {
                   </button>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
 
@@ -3630,7 +3854,10 @@ useEffect(() => {
                   <div className="relative overflow-hidden rounded-xl aspect-[4/3] bg-gray-100 mb-4">
                     <img src={selectedListing.img} alt={selectedListing.title} className="h-full w-full object-cover" />
                     <div className="absolute bottom-3 left-3 flex items-center gap-1 text-white bg-black/50 px-2 py-1 rounded-full text-xs">
-                      <FaStar className="text-yellow-300" /> {renderReviewsRating(selectedListing.reviews)}
+                      <FaStar className="text-yellow-300" /> {renderReviewsRating(selectedListing)}
+                    </div>
+                    <div className="absolute bottom-3 right-3 bg-white/80 text-xs px-2 py-1 rounded-full font-medium">
+                      {selectedListing.calendar || 'Available'}
                     </div>
                   </div>
                   {(selectedListing?.coordinates?.lat && selectedListing?.coordinates?.lng) || (selectedListing?.location || selectedListing?.title) ? (
@@ -3740,22 +3967,81 @@ useEffect(() => {
                     />
                   </div>
 
+                  {/* Coupon Section */}
+                  <div className="bg-gradient-to-r from-pink-50 to-purple-50 rounded-lg p-4 border border-pink-200">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <FaGift className="text-pink-500 text-lg" />
+                        <span className="font-semibold text-gray-800">Have a coupon?</span>
+                      </div>
+                      {myCoupons.length > 0 && (
+                        <span className="text-xs bg-pink-100 text-pink-700 px-2 py-1 rounded-full font-medium">
+                          {myCoupons.length} available
+                        </span>
+                      )}
+                    </div>
+                    
+                    {appliedCoupon ? (
+                      <div className="bg-white rounded-lg p-3 border-2 border-pink-300">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="font-bold text-pink-600">{appliedCoupon.discount}% OFF</span>
+                              <span className="text-xs bg-pink-100 text-pink-700 px-2 py-0.5 rounded-full font-medium">
+                                {appliedCoupon.couponCode}
+                              </span>
+                            </div>
+                            <p className="text-xs text-gray-600">{appliedCoupon.couponName}</p>
+                          </div>
+                          <button
+                            onClick={handleRemoveCoupon}
+                            className="text-red-500 hover:text-red-700 text-sm"
+                          >
+                            <FaTimes />
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setShowRewardsModal(true)}
+                        className="w-full bg-white border-2 border-dashed border-pink-300 rounded-lg px-4 py-3 text-sm text-gray-600 hover:border-pink-400 hover:bg-pink-50 transition flex items-center justify-center gap-2"
+                      >
+                        <FaGift className="text-pink-500" />
+                        {myCoupons.length > 0 ? 'Select a coupon' : 'No coupons available yet'}
+                      </button>
+                    )}
+                  </div>
+
                   {/* Booking Summary */}
                   <div className="bg-gray-50 rounded-lg p-4">
                     <div className="font-semibold mb-2">Booking Summary</div>
                     <div className="space-y-1 text-sm">
                       <div className="flex justify-between">
                         <span>₱{(selectedListing.pricePerNight || 0).toLocaleString()} × {bookingDates.checkIn && bookingDates.checkOut ? Math.ceil((new Date(bookingDates.checkOut) - new Date(bookingDates.checkIn)) / (1000 * 60 * 60 * 24)) : 0} nights</span>
-                        <span>₱{calculateBookingTotal().toLocaleString()}</span>
+                        <span>₱{calculateSubtotal().toLocaleString()}</span>
                       </div>
+                      {appliedCoupon && (
+                        <div className="flex justify-between text-pink-600 font-medium">
+                          <span>Discount ({appliedCoupon.discount}%)</span>
+                          <span>-₱{calculateDiscount().toLocaleString()}</span>
+                        </div>
+                      )}
                       <div className="flex justify-between">
                         <span>Service fee</span>
                         <span>₱{Math.round(calculateBookingTotal() * 0.1).toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between font-semibold border-t pt-1">
                         <span>Total</span>
-                        <span>₱{(calculateBookingTotal() + Math.round(calculateBookingTotal() * 0.1)).toLocaleString()}</span>
+                        <span className={appliedCoupon ? 'text-pink-600' : ''}>
+                          ₱{(calculateBookingTotal() + Math.round(calculateBookingTotal() * 0.1)).toLocaleString()}
+                        </span>
                       </div>
+                      {appliedCoupon && (
+                        <div className="text-xs text-green-600 font-medium flex items-center gap-1 justify-end">
+                          <FaGift />
+                          You saved ₱{calculateDiscount().toLocaleString()}!
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -3775,6 +4061,167 @@ useEffect(() => {
                     </button>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* My Rewards Modal */}
+        {showRewardsModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-lg w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+              <div className="sticky top-0 bg-white border-b p-6 z-10">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 bg-gradient-to-br from-pink-500 to-purple-500 rounded-full flex items-center justify-center">
+                      <FaGift className="text-white text-xl" />
+                    </div>
+                    <div>
+                      <h3 className="text-2xl font-bold text-gray-900">My Rewards</h3>
+                      <p className="text-sm text-gray-600">Use your coupons to save on bookings</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setShowRewardsModal(false)}
+                    className="p-2 rounded-lg hover:bg-gray-100 transition"
+                  >
+                    <FaTimes className="text-gray-600 text-xl" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-6">
+                {/* Stats */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                  <div className="bg-gradient-to-br from-pink-50 to-pink-100 rounded-lg p-4">
+                    <p className="text-sm font-medium text-pink-700">Available Coupons</p>
+                    <p className="text-3xl font-bold text-pink-900">{myCoupons.length}</p>
+                  </div>
+                  <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-4">
+                    <p className="text-sm font-medium text-purple-700">Total Bookings</p>
+                    <p className="text-3xl font-bold text-purple-900">{bookings.length}</p>
+                  </div>
+                  <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-lg p-4">
+                    <p className="text-sm font-medium text-green-700">Potential Savings</p>
+                    <p className="text-3xl font-bold text-green-900">
+                      {Math.max(...myCoupons.map(c => c.discount), 0)}%
+                    </p>
+                  </div>
+                </div>
+
+                {/* How to Earn More */}
+                <div className="bg-blue-50 rounded-lg p-4 mb-6">
+                  <h4 className="font-semibold text-blue-900 mb-2 flex items-center gap-2">
+                    <FaGift className="text-blue-600" />
+                    How to Earn More Rewards
+                  </h4>
+                  <ul className="text-sm text-blue-800 space-y-1">
+                    <li>• Complete more bookings to unlock better discount tiers</li>
+                    <li>• Hosts automatically give you coupons based on your booking history</li>
+                    <li>• Higher booking counts = Better discounts!</li>
+                  </ul>
+                </div>
+
+                {/* Coupons List */}
+                {myCoupons.length > 0 ? (
+                  <div className="space-y-4">
+                    <h4 className="font-bold text-lg text-gray-900">Your Available Coupons</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {myCoupons.map((coupon) => (
+                        <div 
+                          key={coupon.id}
+                          className="border-2 border-pink-200 rounded-xl p-5 bg-gradient-to-br from-white to-pink-50 hover:shadow-lg transition cursor-pointer"
+                          onClick={() => showBookingModal && handleApplyCoupon(coupon)}
+                        >
+                          {/* Discount Badge */}
+                          <div className="bg-gradient-to-r from-pink-500 to-purple-500 text-white rounded-lg p-4 mb-4">
+                            <div className="text-center">
+                              <p className="text-4xl font-bold">{coupon.discount}%</p>
+                              <p className="text-sm">OFF</p>
+                            </div>
+                          </div>
+
+                          {/* Coupon Details */}
+                          <div className="space-y-2">
+                            <h5 className="font-bold text-lg text-gray-900">{coupon.couponName}</h5>
+                            <p className="text-sm text-gray-600">{coupon.description}</p>
+                            
+                            <div className="bg-white rounded-lg p-3 border">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-xs text-gray-500">Coupon Code</span>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    navigator.clipboard.writeText(coupon.couponCode);
+                                    alert('Code copied!');
+                                  }}
+                                  className="text-xs text-blue-600 hover:text-blue-700"
+                                >
+                                  <FaCopy className="inline mr-1" />
+                                  Copy
+                                </button>
+                              </div>
+                              <p className="font-mono font-bold text-purple-600 text-center text-lg">
+                                {coupon.couponCode}
+                              </p>
+                            </div>
+
+                            <div className="flex items-center justify-between text-xs text-gray-600">
+                              <span className="flex items-center gap-1">
+                                <FaClock />
+                                Valid until: {new Date(coupon.validUntil).toLocaleDateString('en-US', { 
+                                  month: 'short', 
+                                  day: 'numeric', 
+                                  year: 'numeric' 
+                                })}
+                              </span>
+                            </div>
+
+                            <div className="text-xs text-gray-500">
+                              From: <span className="font-semibold">{coupon.guestEmail?.split('@')[0] || 'Host'}</span>
+                            </div>
+                          </div>
+
+                          {/* Apply Button */}
+                          {showBookingModal && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleApplyCoupon(coupon);
+                              }}
+                              className="w-full mt-4 bg-gradient-to-r from-pink-500 to-purple-500 text-white px-4 py-3 rounded-lg hover:from-pink-600 hover:to-purple-600 transition font-semibold flex items-center justify-center gap-2"
+                            >
+                              <FaGift />
+                              Apply to Booking
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-center py-12">
+                    <FaGift className="text-6xl mx-auto mb-4 text-gray-300" />
+                    <h3 className="text-lg font-semibold mb-2 text-gray-700">No Rewards Yet</h3>
+                    <p className="text-sm text-gray-500 mb-4">
+                      Complete more bookings to earn discount coupons from hosts!
+                    </p>
+                    <div className="bg-purple-50 rounded-lg p-4 max-w-md mx-auto">
+                      <p className="text-sm text-purple-800">
+                        <strong>Tip:</strong> Many hosts give automatic rewards after your 1st, 3rd, and 5th bookings!
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="sticky bottom-0 bg-gray-50 border-t p-4">
+                <button
+                  onClick={() => setShowRewardsModal(false)}
+                  className="w-full bg-gray-800 text-white px-6 py-3 rounded-lg hover:bg-gray-900 transition font-semibold"
+                >
+                  Close
+                </button>
               </div>
             </div>
           </div>
