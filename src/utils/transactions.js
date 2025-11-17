@@ -143,21 +143,35 @@ export async function approveBookingTransaction(db, bookingId) {
     const booking = snap.data();
     if (booking?.hostId && booking?.total) {
       const totalAmount = booking.total;
-      const adminCommission = totalAmount * 0.05; // 5% for admin
-      const hostEarnings = totalAmount * 0.95; // 95% for host
+      let serviceFeePercent = 5;
+      try {
+        const configSnap = await getDoc(doc(db, "adminSettings", "config"));
+        if (configSnap.exists()) {
+          const cfg = configSnap.data();
+          const parsedFee = Number(cfg.serviceFee);
+          if (!Number.isNaN(parsedFee) && parsedFee >= 0 && parsedFee <= 100) {
+            serviceFeePercent = parsedFee;
+          }
+        }
+      } catch (configError) {
+        console.warn("Failed to load admin service fee; using default 5%", configError);
+      }
+
+      const adminCommission = totalAmount * (serviceFeePercent / 100);
+      const hostEarnings = totalAmount - adminCommission;
       
       // Update host earnings (95%)
       await incrementDashboardMetrics(booking.hostId, "totalEarnings", hostEarnings);
       await incrementDashboardMetrics(booking.hostId, "monthlyRevenue", hostEarnings);
       await incrementDashboardMetrics(booking.hostId, "totalBookings", 1);
       
-      // Update admin wallet (5%)
+      // Update admin wallet based on dynamic commission
       const adminWalletRef = doc(db, "adminWallet", "earnings");
       const adminWalletSnap = await getDoc(adminWalletRef);
-      
       if (adminWalletSnap.exists()) {
-        const currentBalance = adminWalletSnap.data().balance || 0;
-        const currentTotalEarnings = adminWalletSnap.data().totalEarnings || 0;
+        const data = adminWalletSnap.data();
+        const currentBalance = Number(data.balance) || 0;
+        const currentTotalEarnings = Number(data.totalEarnings) || 0;
         await runTransaction(db, async (tx) => {
           tx.update(adminWalletRef, {
             balance: currentBalance + adminCommission,
@@ -170,6 +184,7 @@ export async function approveBookingTransaction(db, bookingId) {
           tx.set(adminWalletRef, {
             balance: adminCommission,
             totalEarnings: adminCommission,
+            paypalBalance: 0,
             createdAt: serverTimestamp(),
             lastUpdated: serverTimestamp()
           });
@@ -184,7 +199,8 @@ export async function approveBookingTransaction(db, bookingId) {
           amount: adminCommission,
           bookingId: bookingId,
           hostId: booking.hostId,
-          description: `5% commission from booking: ${booking.title || 'Booking'}`,
+          serviceFeePercent,
+          description: `${serviceFeePercent}% commission from booking: ${booking.title || 'Booking'}`,
           date: serverTimestamp(),
           status: 'completed'
         });

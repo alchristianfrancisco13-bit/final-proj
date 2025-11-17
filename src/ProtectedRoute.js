@@ -1,6 +1,7 @@
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 
 function ProtectedRoute({ user, allowedRole, userRole, children }) {
+  const location = useLocation();
   console.log("ProtectedRoute check:", {
     user: user ? "logged in" : "not logged in",
     userRole,
@@ -11,6 +12,21 @@ function ProtectedRoute({ user, allowedRole, userRole, children }) {
   if (!user) {
     // ❌ Kung walang login, balik sa Auth page
     console.log("Access denied: No user logged in");
+
+    try {
+      const searchParams = new URLSearchParams(location.search || "");
+      const listingId = searchParams.get("listingId");
+      const bookingId = searchParams.get("bookingId");
+      if (listingId && typeof window !== "undefined") {
+        sessionStorage.setItem("sharedListingId", listingId);
+      }
+      if (bookingId && typeof window !== "undefined") {
+        sessionStorage.setItem("sharedBookingId", bookingId);
+      }
+    } catch (error) {
+      console.error("Failed to preserve shared link params:", error);
+    }
+
     return <Navigate to="/" replace />;
   }
 

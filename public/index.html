@@ -28,6 +28,49 @@
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
+    <script>
+      // Suppress generic "Script error" messages BEFORE React loads
+      // These errors are often CORS/network related from external scripts (PayPal SDK, etc.)
+      (function() {
+        // Suppress in window.onerror (catches errors before React)
+        var originalOnError = window.onerror;
+        window.onerror = function(message, source, lineno, colno, error) {
+          if (message && typeof message === 'string' && message.indexOf('Script error') !== -1) {
+            console.warn('Suppressed generic script error (likely CORS/network related):', {
+              message: message,
+              source: source,
+              lineno: lineno,
+              colno: colno
+            });
+            return true; // Suppress the error
+          }
+          if (originalOnError) {
+            return originalOnError.call(this, message, source, lineno, colno, error);
+          }
+          return false;
+        };
+
+        // Suppress in error events
+        window.addEventListener('error', function(event) {
+          if (event.message && typeof event.message === 'string' && event.message.indexOf('Script error') !== -1) {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            console.warn('Suppressed generic script error event (likely CORS/network related)');
+          }
+        }, true);
+
+        // Suppress in unhandled promise rejections
+        window.addEventListener('unhandledrejection', function(event) {
+          var errorMessage = (event.reason && event.reason.message) || String(event.reason || '');
+          if (typeof errorMessage === 'string' && errorMessage.indexOf('Script error') !== -1) {
+            event.preventDefault();
+            event.stopPropagation();
+            console.warn('Suppressed generic script error in promise rejection (likely CORS/network related)');
+          }
+        }, true);
+      })();
+    </script>
     <div id="root"></div>
     <!--
       This HTML file is a template.

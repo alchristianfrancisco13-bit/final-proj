@@ -20,6 +20,9 @@ export const initializeDashboardMetrics = async (hostId) => {
         responseRate: 0,
         responseTime: "<1hr",
         cancellationRate: 0,
+        points: 0,
+        totalPointsEarned: 0,
+        pointsRedeemed: 0,
         lastUpdated: new Date().toISOString(),
       });
     }

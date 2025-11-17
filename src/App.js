@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Navigate, useParams, useNavigate, useLocation } from "react-router-dom";
 import { useState, useEffect } from "react";
 import { auth, db } from "./firebase";
 import { signOut, onAuthStateChanged } from "firebase/auth";
@@ -14,6 +14,7 @@ import HelpCenter from "./pages/HelpCenter";
 import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
 import Footer from "./components/Footer";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 
 function App() {
@@ -21,6 +22,64 @@ function App() {
   const [user, setUser] = useState(null);
   const [userRole, setUserRole] = useState(null);
   const [loading, setLoading] = useState(true);
+
+  // Global error handler to suppress generic "Script error" messages (usually from external scripts like PayPal SDK)
+  useEffect(() => {
+    // Store original error handlers
+    const originalErrorHandler = window.onerror;
+    const originalUnhandledRejectionHandler = window.onunhandledrejection;
+
+    // Handle window.onerror (for React and other global error handlers)
+    window.onerror = (message, source, lineno, colno, error) => {
+      // Suppress generic "Script error" messages (often CORS/network related from external scripts)
+      if (message && typeof message === 'string' && message.includes('Script error')) {
+        console.warn('Suppressed generic script error (likely CORS/network related from external script):', {
+          message,
+          source,
+          lineno,
+          colno
+        });
+        return true; // Suppress the error
+      }
+      // Let other errors through to original handler
+      if (originalErrorHandler) {
+        return originalErrorHandler(message, source, lineno, colno, error);
+      }
+      return false;
+    };
+
+    // Handle unhandled promise rejections
+    const handleUnhandledRejection = (event) => {
+      // Suppress generic script errors in promise rejections
+      const errorMessage = event.reason?.message || event.reason?.toString() || '';
+      if (typeof errorMessage === 'string' && errorMessage.includes('Script error')) {
+        console.warn('Suppressed generic script error in promise rejection (likely CORS/network related):', event.reason);
+        event.preventDefault();
+        return;
+      }
+      // Let other rejections through
+    };
+
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+
+    // Also handle error events (for event-based error handling)
+    const handleErrorEvent = (event) => {
+      if (event.message && typeof event.message === 'string' && event.message.includes('Script error')) {
+        event.preventDefault();
+        console.warn('Suppressed generic script error event (likely CORS/network related from external script)');
+        return;
+      }
+    };
+
+    window.addEventListener('error', handleErrorEvent, true);
+
+    // Cleanup
+    return () => {
+      window.onerror = originalErrorHandler;
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+      window.removeEventListener('error', handleErrorEvent, true);
+    };
+  }, []);
 
   // Auth state persistence
   useEffect(() => {
@@ -99,10 +158,11 @@ function App() {
   });
 
   return (
-    <Router>
-      <div className="flex flex-col min-h-screen">
-        <div className="flex-grow">
-          <Routes>
+    <ErrorBoundary>
+      <Router>
+        <div className="flex flex-col min-h-screen">
+          <div className="flex-grow">
+            <Routes>
             <Route 
               path="/" 
               element={
@@ -117,13 +177,11 @@ function App() {
               } 
             />
             <Route path="/register" element={<Register />} />
+            <Route path="/listing/:listingId" element={<ListingPublicWrapper />} />
+            <Route path="/booking/:bookingId" element={<BookingPublicWrapper />} />
             <Route
               path="/guest"
-              element={
-                <ProtectedRoute user={user} allowedRole="guest" userRole={userRole}>
-                  <GuestPage onLogout={handleLogout} />
-                </ProtectedRoute>
-              }
+              element={<GuestRouteWrapper user={user} userRole={userRole} onLogout={handleLogout} />}
             />
             <Route
               path="/host"
@@ -174,12 +232,80 @@ function App() {
             <Route path="/help" element={<HelpCenter />} />
             <Route path="/terms" element={<Terms />} />
             <Route path="/privacy" element={<Privacy />} />
-          </Routes>
+            </Routes>
+          </div>
+          <Footer />
         </div>
-        <Footer />
-      </div>
-    </Router>
+      </Router>
+    </ErrorBoundary>
   );
 }
+
+const ListingPublicWrapper = () => {
+  const params = useParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  useEffect(() => {
+    const id = params?.listingId;
+    if (!id) {
+      navigate("/guest", { replace: true });
+      return;
+    }
+    try {
+      sessionStorage.setItem("sharedListingId", id);
+    } catch (error) {
+      console.error("Failed to store shared listing id:", error);
+    }
+    const searchParams = new URLSearchParams(location.search);
+    searchParams.set("listingId", id);
+    const queryString = searchParams.toString();
+    navigate(`/guest${queryString ? `?${queryString}` : ""}`, { replace: true });
+  }, [params, navigate, location.search]);
+  return null;
+};
+
+const BookingPublicWrapper = () => {
+  const params = useParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  useEffect(() => {
+    const id = params?.bookingId;
+    if (!id) {
+      navigate("/guest", { replace: true });
+      return;
+    }
+    try {
+      sessionStorage.setItem("sharedBookingId", id);
+    } catch (error) {
+      console.error("Failed to store shared booking id:", error);
+    }
+    const searchParams = new URLSearchParams(location.search);
+    searchParams.set("bookingId", id);
+    const queryString = searchParams.toString();
+    navigate(`/guest${queryString ? `?${queryString}` : ""}`, { replace: true });
+  }, [params, navigate, location.search]);
+  return null;
+};
+
+// Wrapper component that allows public access to /guest when there's a shared link
+const GuestRouteWrapper = ({ user, userRole, onLogout }) => {
+  const location = useLocation();
+  const searchParams = new URLSearchParams(location.search);
+  const hasListingId = searchParams.has("listingId");
+  const hasBookingId = searchParams.has("bookingId");
+  const hasSharedLink = hasListingId || hasBookingId;
+
+  // If there's a shared link, allow public access (no login required)
+  if (hasSharedLink) {
+    return <GuestPage onLogout={onLogout} />;
+  }
+
+  // Otherwise, require login and guest role
+  return (
+    <ProtectedRoute user={user} allowedRole="guest" userRole={userRole}>
+      <GuestPage onLogout={onLogout} />
+    </ProtectedRoute>
+  );
+};
 
 export default App;

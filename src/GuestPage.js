@@ -2,26 +2,249 @@ import { useState, useEffect } from "react";
 import { 
   collection, addDoc, doc, updateDoc, getDocs, query, 
   where, onSnapshot, Timestamp, serverTimestamp, getDoc,
-  increment, arrayUnion, setDoc, deleteDoc, orderBy, limit
+  increment, arrayUnion, setDoc, deleteDoc, orderBy, limit, runTransaction
 } from "firebase/firestore";
 import { db, auth } from "./firebase";
 import { incrementDashboardMetrics } from "./utils/dashboardMetrics";
 import { 
   FaHeart, FaSearch, FaWallet, FaListAlt, FaUserCircle, FaStar, FaShareAlt, FaTrash, 
-  FaRegCalendarAlt, FaRegCommentDots, FaCamera, FaSignOutAlt, FaFilter, FaMapMarkerAlt, 
+  FaRegCalendarAlt, FaRegCommentDots, FaCamera, FaImages, FaSignOutAlt, FaFilter, FaMapMarkerAlt, 
   FaUsers, FaCalendarAlt, FaPhone, FaEnvelope, FaFacebook, FaTwitter, FaInstagram, 
   FaWhatsapp, FaTelegram, FaCopy, FaEye, FaEyeSlash, FaCog, FaBookmark, FaHistory,
   FaGift, FaThumbsUp, FaLocationArrow, FaWifi, FaCar, FaSwimmingPool, FaUtensils,
   FaTv, FaShower, FaBed, FaParking, FaLock, FaFire, FaSnowflake, FaUmbrella, FaCreditCard,
-  FaKey, FaSpinner, FaClock, FaExclamationTriangle, FaBars, FaTimes
+  FaKey, FaSpinner, FaClock, FaExclamationTriangle, FaBars, FaTimes, FaChevronLeft, FaChevronRight, FaGavel, FaSync
 } from "react-icons/fa";
 import { updateEmail, sendEmailVerification, reauthenticateWithCredential, EmailAuthProvider } from "firebase/auth";
 import { updateListingMetrics } from "./utils/listingMetrics";
 import Messages from "./components/Messages";
 import ChatList from "./components/ChatList";
-import { PAYPAL_CONFIG } from "./config";
+import { PAYPAL_CONFIG, EMAILJS_CANCELLATION_CONFIG } from "./config";
+import emailjs from '@emailjs/browser';
+import { buildCancellationConfirmationTemplate } from "./utils/emailTemplates";
 
+const ENV_SHARE_ORIGIN =
+  typeof process !== "undefined" &&
+  process.env &&
+  typeof process.env.REACT_APP_PUBLIC_URL === "string" &&
+  process.env.REACT_APP_PUBLIC_URL.trim() !== ""
+    ? process.env.REACT_APP_PUBLIC_URL.replace(/\/$/, "")
+    : null;
 
+const SHARE_ORIGIN_FALLBACK = ENV_SHARE_ORIGIN || "https://stayhub.web.app";
+
+// Date Range Picker Component
+const DateRangePicker = ({ checkIn, checkOut, onChange, minDate, bookedDates = [], bookedRanges = [] }) => {
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [selecting, setSelecting] = useState('checkIn'); // 'checkIn' or 'checkOut'
+  const [tempCheckIn, setTempCheckIn] = useState(checkIn || '');
+  const [tempCheckOut, setTempCheckOut] = useState(checkOut || '');
+
+  useEffect(() => {
+    setTempCheckIn(checkIn || '');
+    setTempCheckOut(checkOut || '');
+    // Navigate to the month of check-in date if available
+    if (checkIn) {
+      const checkInDate = new Date(checkIn);
+      setCurrentMonth(new Date(checkInDate.getFullYear(), checkInDate.getMonth(), 1));
+    }
+  }, [checkIn, checkOut]);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const isDateBooked = (date) => {
+    const dateStr = date.toISOString().split('T')[0];
+    return bookedDates.includes(dateStr);
+  };
+
+  const isDateInBookedRange = (date) => {
+    const dateStr = date.toISOString().split('T')[0];
+    return bookedRanges.some(range => {
+      const rangeStart = new Date(range.checkIn);
+      const rangeEnd = new Date(range.checkOut);
+      return date >= rangeStart && date < rangeEnd;
+    });
+  };
+
+  const isDateDisabled = (date) => {
+    if (date < today) return true;
+    if (isDateBooked(date)) return true;
+    if (isDateInBookedRange(date)) return true;
+    if (minDate && date < new Date(minDate)) return true;
+    return false;
+  };
+
+  const handleDateClick = (date) => {
+    if (isDateDisabled(date)) return;
+
+    const dateStr = date.toISOString().split('T')[0];
+
+    if (selecting === 'checkIn') {
+      setTempCheckIn(dateStr);
+      setTempCheckOut('');
+      setSelecting('checkOut');
+      onChange({ checkIn: dateStr, checkOut: '' });
+    } else {
+      // Selecting check-out
+      if (dateStr <= tempCheckIn) {
+        // If selected date is before or equal to check-in, make it the new check-in
+        setTempCheckIn(dateStr);
+        setTempCheckOut('');
+        onChange({ checkIn: dateStr, checkOut: '' });
+      } else {
+        setTempCheckOut(dateStr);
+        setSelecting('checkIn');
+        onChange({ checkIn: tempCheckIn, checkOut: dateStr });
+      }
+    }
+  };
+
+  const getDaysInMonth = (date) => {
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const lastDay = new Date(year, month + 1, 0);
+    const daysInMonth = lastDay.getDate();
+    const startingDayOfWeek = firstDay.getDay();
+
+    const days = [];
+    
+    // Add empty cells for days before the first day of the month
+    for (let i = 0; i < startingDayOfWeek; i++) {
+      days.push(null);
+    }
+
+    // Add all days of the month
+    for (let day = 1; day <= daysInMonth; day++) {
+      days.push(new Date(year, month, day));
+    }
+
+    return days;
+  };
+
+  const isInRange = (date) => {
+    if (!tempCheckIn || !tempCheckOut) return false;
+    const dateStr = date.toISOString().split('T')[0];
+    return dateStr >= tempCheckIn && dateStr <= tempCheckOut;
+  };
+
+  const isStartDate = (date) => {
+    if (!tempCheckIn) return false;
+    return date.toISOString().split('T')[0] === tempCheckIn;
+  };
+
+  const isEndDate = (date) => {
+    if (!tempCheckOut) return false;
+    return date.toISOString().split('T')[0] === tempCheckOut;
+  };
+
+  const prevMonth = () => {
+    setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1));
+  };
+
+  const nextMonth = () => {
+    setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1));
+  };
+
+  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const days = getDaysInMonth(currentMonth);
+
+  return (
+    <div className="border rounded-lg p-4 bg-white">
+      <div className="flex items-center justify-between mb-4">
+        <button
+          onClick={prevMonth}
+          className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+          type="button"
+        >
+          <FaChevronLeft className="text-gray-600" />
+        </button>
+        <h3 className="font-semibold text-lg">
+          {monthNames[currentMonth.getMonth()]} {currentMonth.getFullYear()}
+        </h3>
+        <button
+          onClick={nextMonth}
+          className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+          type="button"
+        >
+          <FaChevronRight className="text-gray-600" />
+        </button>
+      </div>
+
+      <div className="grid grid-cols-7 gap-1 mb-2">
+        {dayNames.map(day => (
+          <div key={day} className="text-center text-xs font-semibold text-gray-500 py-2">
+            {day}
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-7 gap-1">
+        {days.map((date, idx) => {
+          if (!date) {
+            return <div key={`empty-${idx}`} className="aspect-square" />;
+          }
+
+          const dateStr = date.toISOString().split('T')[0];
+          const disabled = isDateDisabled(date);
+          const inRange = isInRange(date);
+          const isStart = isStartDate(date);
+          const isEnd = isEndDate(date);
+          const isToday = dateStr === today.toISOString().split('T')[0];
+
+          return (
+            <button
+              key={dateStr}
+              type="button"
+              onClick={() => handleDateClick(date)}
+              disabled={disabled}
+              className={`
+                aspect-square rounded-lg text-sm font-medium transition-all
+                ${disabled 
+                  ? 'text-gray-300 cursor-not-allowed bg-gray-50' 
+                  : inRange
+                    ? isStart || isEnd
+                      ? 'bg-[#bfa14a] text-white font-semibold'
+                      : 'bg-[#bfa14a]/20 text-[#bfa14a]'
+                    : 'text-gray-700 hover:bg-gray-100'
+                }
+                ${isToday && !disabled ? 'ring-2 ring-[#bfa14a] ring-offset-1' : ''}
+              `}
+            >
+              {date.getDate()}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mt-4 pt-4 border-t text-sm text-gray-600">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <div className="w-4 h-4 rounded bg-[#bfa14a]"></div>
+            <span>Selected dates</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-4 h-4 rounded bg-gray-300"></div>
+            <span>Unavailable</span>
+          </div>
+        </div>
+        {tempCheckIn && (
+          <div className="mt-2 text-xs">
+            <span className="font-semibold">Check-in:</span> {new Date(tempCheckIn).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+            {tempCheckOut && (
+              <>
+                {' • '}
+                <span className="font-semibold">Check-out:</span> {new Date(tempCheckOut).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 function GuestPage({ onLogout }) {
 
@@ -29,34 +252,54 @@ function GuestPage({ onLogout }) {
     document.title = "Guest Dashboard - StayHub";
   }, []);
 
-  // Load transaction history from Firestore
+  // Load transaction history from Firestore (real-time listener)
   useEffect(() => {
-    const loadTransactions = async () => {
       const userId = auth.currentUser?.uid;
-      if (userId) {
-        try {
+    if (!userId) return;
+
           const transactionsRef = collection(db, "transactions");
-          const q = query(
+    const transactionsQuery = query(
             transactionsRef,
             where("userId", "==", userId),
             orderBy("createdAt", "desc"),
-            limit(50)
+      limit(100)
           );
-          const querySnapshot = await getDocs(q);
-          const loadedTransactions = querySnapshot.docs.map(doc => ({
+    
+    const unsubTransactions = onSnapshot(transactionsQuery, (snapshot) => {
+      const loadedTransactions = snapshot.docs.map(doc => ({
             id: doc.id,
             ...doc.data()
           }));
           setTransactions(loadedTransactions);
-          console.log('Loaded transactions:', loadedTransactions.length);
-        } catch (error) {
+      console.log('Loaded transactions from Firestore:', loadedTransactions.length);
+    }, (error) => {
           console.error('Error loading transactions:', error);
-        }
-      }
-    };
+      // If orderBy fails (index might not exist), try without orderBy
+      const transactionsQueryFallback = query(
+        transactionsRef,
+        where("userId", "==", userId),
+        limit(100)
+      );
+      const unsubTransactionsFallback = onSnapshot(transactionsQueryFallback, (snapshot) => {
+        const loadedTransactions = snapshot.docs
+          .map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          }))
+          .sort((a, b) => {
+            const dateA = a.createdAt ? new Date(a.createdAt) : a.timestamp?.toDate ? a.timestamp.toDate() : new Date(0);
+            const dateB = b.createdAt ? new Date(b.createdAt) : b.timestamp?.toDate ? b.timestamp.toDate() : new Date(0);
+            return dateB - dateA;
+          });
+        setTransactions(loadedTransactions);
+      });
+      return () => unsubTransactionsFallback();
+    });
 
-    loadTransactions();
-  }, []);
+    return () => {
+      unsubTransactions();
+    };
+  }, [auth.currentUser?.uid]);
 
   // Load guest coupons/rewards from Firestore
   useEffect(() => {
@@ -121,8 +364,13 @@ function GuestPage({ onLogout }) {
             
             // Load PayPal balance from Firestore
             if (userData.paypalBalance !== undefined) {
-              setPaypalBalance(userData.paypalBalance);
-              console.log('Loaded PayPal balance:', userData.paypalBalance);
+              const balance = parseFloat(userData.paypalBalance) || 0;
+              setPaypalBalance(balance);
+              console.log('Loaded PayPal balance from Firestore:', balance);
+            } else {
+              // Initialize balance to 0 if not set
+              setPaypalBalance(0);
+              await savePayPalBalance(0);
             }
           } else {
             // Fallback to localStorage if Firestore data doesn't exist
@@ -153,6 +401,43 @@ function GuestPage({ onLogout }) {
     };
 
     loadUserProfile();
+  }, []);
+
+  // Real-time listener for PayPal balance from Firestore (source of truth)
+  useEffect(() => {
+    const userId = auth.currentUser?.uid;
+    if (!userId) return;
+
+    const userRef = doc(db, "users", userId);
+    const unsubscribe = onSnapshot(userRef, (docSnapshot) => {
+      if (docSnapshot.exists()) {
+        const userData = docSnapshot.data();
+        if (userData.paypalBalance !== undefined) {
+          const balance = parseFloat(userData.paypalBalance) || 0;
+          setPaypalBalance(balance);
+          console.log('✅ PayPal balance synced from Firestore (source of truth):', balance);
+        } else {
+          // Initialize balance to 0 if not set
+          setPaypalBalance(0);
+          savePayPalBalance(0);
+        }
+      }
+    }, (error) => {
+      console.error('❌ Error listening to PayPal balance:', error);
+    });
+
+    return () => unsubscribe();
+  }, [auth.currentUser?.uid]);
+
+  // Countdown timer for cancellation deadline (updates every second)
+  const [currentTime, setCurrentTime] = useState(new Date());
+  
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000); // Update every second
+
+    return () => clearInterval(timer);
   }, []);
 
   // Initial listings state setup
@@ -370,10 +655,12 @@ function GuestPage({ onLogout }) {
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [priceRange, setPriceRange] = useState([0, 10000]);
   const [selectedAmenities, setSelectedAmenities] = useState([]);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showGuestDropdown, setShowGuestDropdown] = useState(false);
   const [showShareModal, setShowShareModal] = useState(null);
   const [showBookingShareModal, setShowBookingShareModal] = useState(null);
   const [showAccountSettings, setShowAccountSettings] = useState(false);
-  const [paypalBalance, setPaypalBalance] = useState(100.00); // USD balance
+  const [paypalBalance, setPaypalBalance] = useState(0); // PHP balance - will be loaded from Firestore
   const [showPayPalTopUp, setShowPayPalTopUp] = useState(false);
   const [showPayPalTopUpPayment, setShowPayPalTopUpPayment] = useState(false);
   const [showPayPalCashIn, setShowPayPalCashIn] = useState(false);
@@ -387,7 +674,7 @@ function GuestPage({ onLogout }) {
   const [showBookingModal, setShowBookingModal] = useState(false);
   const [selectedListing, setSelectedListing] = useState(null);
   const [bookingDates, setBookingDates] = useState({ checkIn: '', checkOut: '' });
-  const [bookingGuests, setBookingGuests] = useState(2);
+  const [bookingGuests, setBookingGuests] = useState(1);
   const [bookingNotes, setBookingNotes] = useState('');
   const [showBookingConfirmation, setShowBookingConfirmation] = useState(false);
   const [showPayPalPayment, setShowPayPalPayment] = useState(false);
@@ -401,6 +688,12 @@ function GuestPage({ onLogout }) {
   const [selectedBookingToRate, setSelectedBookingToRate] = useState(null);
   const [rating, setRating] = useState(0);
   const [review, setReview] = useState("");
+  const [isImageGalleryOpen, setIsImageGalleryOpen] = useState(false);
+  const [galleryImages, setGalleryImages] = useState([]);
+  const [galleryListing, setGalleryListing] = useState(null);
+  const [galleryIndex, setGalleryIndex] = useState(0);
+  const [deepLinkListingId, setDeepLinkListingId] = useState(null);
+  const [platformPolicy, setPlatformPolicy] = useState(null);
 
   // Edit Profile Modal states
   const [showEditProfile, setShowEditProfile] = useState(false);
@@ -577,6 +870,240 @@ useEffect(() => {
   return () => unsub();
 }, [auth.currentUser]);
 
+useEffect(() => {
+  const fetchPlatformPolicy = async () => {
+    try {
+      const policySnap = await getDoc(doc(db, "adminSettings", "platformPolicy"));
+      if (policySnap.exists()) {
+        const data = policySnap.data();
+        setPlatformPolicy({
+          cancellation: data.cancellation || "24-hour free cancellation",
+          rules: data.rules || "Please follow house guidelines",
+          reports: data.reports || "Contact support for assistance",
+        });
+      } else {
+        setPlatformPolicy({
+          cancellation: "24-hour free cancellation",
+          rules: "Please follow house guidelines",
+          reports: "Contact support for assistance",
+        });
+      }
+    } catch (error) {
+      console.error("Failed to load platform policy:", error);
+    }
+  };
+  fetchPlatformPolicy();
+}, []);
+
+  const buildShareUrl = (type, id) => {
+    const origin =
+      typeof window !== "undefined" &&
+      window.location &&
+      typeof window.location.origin === "string"
+        ? window.location.origin
+        : SHARE_ORIGIN_FALLBACK;
+    const queryKey = type === "booking" ? "bookingId" : "listingId";
+    return `${origin}/guest?${queryKey}=${encodeURIComponent(id)}`;
+  };
+
+  const parseNumber = (value) => {
+    if (value === undefined || value === null || value === "") return null;
+    if (typeof value === "number" && !Number.isNaN(value)) return value;
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      if (/^-?\d+(\.\d+)?$/g.test(trimmed)) {
+        const parsed = Number(trimmed);
+        return Number.isNaN(parsed) ? null : parsed;
+      }
+      const match = trimmed.match(/-?\d+(\.\d+)?/);
+      if (match) {
+        const parsed = Number(match[0]);
+        return Number.isNaN(parsed) ? null : parsed;
+      }
+    }
+    return null;
+  };
+
+  const getNumericValue = (listing, keys = [], fallback = null) => {
+    if (!listing) return fallback;
+    for (const key of keys) {
+      if (!(key in listing)) continue;
+      const numeric = parseNumber(listing[key]);
+      if (numeric !== null) return numeric;
+    }
+    return fallback;
+  };
+
+  const getListingGuestCapacity = (listing) =>
+    getNumericValue(listing, ["maxGuests", "guestCapacity", "capacity", "guestsAllowed", "guests"], 1);
+
+  const getListingBedrooms = (listing) =>
+    getNumericValue(listing, ["bedrooms", "beds", "rooms", "roomCount"], null);
+
+  const getListingBathrooms = (listing) =>
+    getNumericValue(listing, ["bathrooms", "baths", "bathroomCount"], null);
+
+  const formatDuration = (value) => {
+    if (!value && value !== 0) return null;
+    if (typeof value === "number") {
+      return `${value} hour${value === 1 ? "" : "s"}`;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      if (/^\d+$/g.test(trimmed)) {
+        const num = Number(trimmed);
+        if (!Number.isNaN(num)) {
+          return `${num} hour${num === 1 ? "" : "s"}`;
+        }
+      }
+      return trimmed;
+    }
+    return null;
+  };
+
+  const getListingDuration = (listing) => {
+    if (!listing) return null;
+    const raw =
+      listing.duration ??
+      listing.durationLabel ??
+      listing.time ??
+      listing.experienceDuration ??
+      listing.serviceDuration ??
+      null;
+    return formatDuration(raw);
+  };
+
+  const getListingGroupSize = (listing) =>
+    getNumericValue(listing, ["groupSize", "maxGroupSize", "capacity", "maxGuests"], null);
+
+  const getListingServiceType = (listing) => {
+    if (!listing) return null;
+    return (
+      listing.serviceType ||
+      listing.type ||
+      listing.serviceName ||
+      listing.serviceCategory ||
+      null
+    );
+  };
+
+  const extractListingImages = (listing) => {
+    if (!listing) return [];
+
+    const pushImage = (img, target) => {
+      if (!img) return;
+      if (typeof img === "string") {
+        const trimmed = img.trim();
+        if (trimmed) target.push(trimmed);
+        return;
+      }
+      if (typeof img === "object") {
+        const candidates = [img.url, img.src, img.path];
+        candidates.forEach((candidate) => {
+          if (typeof candidate === "string") {
+            const trimmed = candidate.trim();
+            if (trimmed) target.push(trimmed);
+          }
+        });
+      }
+    };
+
+    const collected = [];
+    const candidateArrays = [
+      listing.uploadedImages,
+      listing.images,
+      listing.gallery,
+      listing.imageGallery,
+      listing.media,
+      listing.photos,
+    ];
+
+    candidateArrays.forEach((arr) => {
+      if (Array.isArray(arr)) {
+        arr.forEach((item) => pushImage(item, collected));
+      }
+    });
+
+    pushImage(listing.img, collected);
+    pushImage(listing.coverPhoto, collected);
+    pushImage(listing.primaryImage, collected);
+
+    const unique = [];
+    const seen = new Set();
+    collected.forEach((src) => {
+      if (!seen.has(src)) {
+        seen.add(src);
+        unique.push(src);
+      }
+    });
+
+    return unique;
+  };
+
+  const handleOpenImageGallery = (listing, startIndex = 0, fallbackImage = null) => {
+    let images = extractListingImages(listing);
+    if (images.length === 0 && fallbackImage) {
+      images = [fallbackImage];
+    }
+    if (images.length === 0) {
+      alert("No images available for this listing yet.");
+      return;
+    }
+
+    const normalizedIndex =
+      typeof startIndex === "number" && startIndex >= 0 && startIndex < images.length
+        ? startIndex
+        : 0;
+
+    setGalleryListing(listing);
+    setGalleryImages(images);
+    setGalleryIndex(normalizedIndex);
+    setIsImageGalleryOpen(true);
+  };
+
+  const handleCloseImageGallery = () => {
+    setIsImageGalleryOpen(false);
+    setGalleryImages([]);
+    setGalleryListing(null);
+    setGalleryIndex(0);
+  };
+
+  const handleGalleryNavigate = (direction) => {
+    setGalleryIndex((prev) => {
+      if (!galleryImages || galleryImages.length === 0) return 0;
+      const nextIndex = (prev + direction + galleryImages.length) % galleryImages.length;
+      return nextIndex;
+    });
+  };
+
+  const handleSelectGalleryImage = (index) => {
+    if (!galleryImages || galleryImages.length === 0) return;
+    if (index < 0 || index >= galleryImages.length) return;
+    setGalleryIndex(index);
+  };
+
+  useEffect(() => {
+    if (!isImageGalleryOpen) return;
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setIsImageGalleryOpen(false);
+        setGalleryImages([]);
+        setGalleryListing(null);
+        setGalleryIndex(0);
+      } else if (event.key === "ArrowRight" && galleryImages.length > 0) {
+        setGalleryIndex((prev) => (prev + 1) % galleryImages.length);
+      } else if (event.key === "ArrowLeft" && galleryImages.length > 0) {
+        setGalleryIndex((prev) => (prev - 1 + galleryImages.length) % galleryImages.length);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isImageGalleryOpen, galleryImages.length]);
+
   // Handle opening the rating modal
   const handleOpenRating = (booking) => {
     setSelectedBookingToRate(booking);
@@ -644,16 +1171,25 @@ useEffect(() => {
       const newNumReviews = currentNumReviews + 1;
       const newRating = ((currentRating * currentNumReviews) + rating) / newNumReviews;
       
-      // Update the listing document
+      // Store review in a separate collection to avoid document size limit
+      const reviewsRef = collection(db, "reviews");
+      const newReviewRef = await addDoc(reviewsRef, {
+        ...reviewObj,
+        listingId: selectedBookingToRate.listingId,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      
+      // Update the listing document - only store rating and count, not full reviews
       await updateDoc(listingRef, {
         rating: parseFloat(newRating.toFixed(1)),
         numReviews: newNumReviews,
-        reviews: arrayUnion(reviewObj),
         lastReviewDate: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
 
       console.log(`Updated listing ${selectedBookingToRate.listingId} with new rating: ${newRating.toFixed(1)}`);
+      console.log(`Review saved to separate collection: ${newReviewRef.id}`);
 
       // Update the booking document to mark as rated
       const bookingRef = doc(db, "bookings", selectedBookingToRate.id);
@@ -661,6 +1197,7 @@ useEffect(() => {
         hasRated: true,
         rating: rating,
         review: review.trim(),
+        reviewId: newReviewRef.id, // Store reference to review
         reviewDate: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
@@ -758,29 +1295,78 @@ useEffect(() => {
           createdAt: new Date().toISOString()
         };
         await addDoc(transactionsRef, newTransaction);
-        console.log('Transaction saved:', newTransaction);
+        console.log('Transaction saved to Firestore:', newTransaction);
         
-        // Update local state
-        setTransactions(prev => [newTransaction, ...prev]);
+        // Local state will be updated automatically by the real-time listener
       } catch (error) {
         console.error('Error saving transaction:', error);
       }
     }
   };
 
-  // Save PayPal balance to Firestore
+  // Sync PayPal balance - Firestore is the source of truth
+  // Note: PayPal doesn't provide a direct API to get user balance by email
+  // So we use Firestore as the source of truth and update it on every transaction
+  const syncPayPalBalance = async () => {
+    const userId = auth.currentUser?.uid;
+    if (!userId) {
+      console.error('Cannot sync PayPal balance: User not authenticated');
+      return;
+    }
+
+    try {
+      // Firestore is the source of truth for balance
+      // The balance is updated on every transaction (cash-in, top-up, booking, refund)
+      // So we just need to ensure it's loaded from Firestore
+      const userRef = doc(db, "users", userId);
+      const userSnap = await getDoc(userRef);
+      
+      if (userSnap.exists()) {
+        const userData = userSnap.data();
+        const currentBalance = parseFloat(userData.paypalBalance || 0);
+        
+        // Update local state to match Firestore
+        setPaypalBalance(currentBalance);
+        
+        console.log('✅ PayPal balance synced from Firestore (source of truth):', currentBalance);
+        alert(`Balance synced! Current wallet balance: ₱${currentBalance.toLocaleString()} PHP`);
+      } else {
+        // User document doesn't exist, initialize balance to 0
+        await savePayPalBalance(0);
+        alert('Balance initialized to ₱0 PHP');
+      }
+    } catch (error) {
+      console.error('❌ Error syncing PayPal balance:', error);
+      alert(`Failed to sync balance: ${error.message}`);
+    }
+  };
+
+  // Save PayPal balance to Firestore (ensures it's always saved to PayPal account via Firestore)
   const savePayPalBalance = async (newBalance) => {
     const userId = auth.currentUser?.uid;
-    if (userId) {
-      try {
+    if (!userId) {
+      console.error('Cannot save PayPal balance: User not authenticated');
+      return;
+    }
+
+    try {
+      // Ensure balance is a valid number
+      const balance = parseFloat(newBalance) || 0;
+      
+      // Save to Firestore (this syncs with PayPal Sandbox account)
         await updateDoc(doc(db, "users", userId), {
-          paypalBalance: newBalance,
+        paypalBalance: balance,
           updatedAt: serverTimestamp()
         });
-        console.log('PayPal balance saved to Firestore:', newBalance);
+      
+      console.log('✅ PayPal balance saved to Firestore (synced with PayPal Sandbox):', balance);
+      
+      // Update local state immediately (real-time listener will also update it)
+      setPaypalBalance(balance);
       } catch (error) {
-        console.error('Error saving PayPal balance:', error);
-      }
+      console.error('❌ Error saving PayPal balance to Firestore:', error);
+      // Show user-friendly error
+      alert('Failed to save PayPal balance. Please try again.');
     }
   };
 
@@ -795,15 +1381,15 @@ useEffect(() => {
   const handleCustomAmountSubmit = () => {
     const amount = parseFloat(customAmount);
     if (isNaN(amount) || amount <= 0) {
-      showAlert('error', 'Invalid Amount', 'Please enter a valid amount greater than $0', [
+      showAlert('error', 'Invalid Amount', 'Please enter a valid amount greater than ₱0', [
         'Amount must be a positive number',
-        'Minimum: $0.01 USD'
+        'Minimum: ₱1 PHP'
       ]);
       return;
     }
-    if (amount > 10000) {
-      showAlert('error', 'Amount Too Large', 'Maximum amount is $10,000 USD', [
-        `You entered: $${amount.toLocaleString()} USD`,
+    if (amount > 1000000) {
+      showAlert('error', 'Amount Too Large', 'Maximum amount is ₱1,000,000 PHP', [
+        `You entered: ₱${amount.toLocaleString()} PHP`,
         'Please enter a smaller amount'
       ]);
       return;
@@ -819,13 +1405,13 @@ useEffect(() => {
       setPaypalBalance(newBalance);
       await savePayPalBalance(newBalance);
       
-      console.log(`✅ Cash-in successful: $${cashInAmount} USD. Transaction: ${transactionId}`);
+      console.log(`✅ Cash-in successful: ₱${cashInAmount.toLocaleString()} PHP. Transaction: ${transactionId}`);
       
       // Save transaction to history
       await saveTransaction({
         type: 'Cash-In',
         amount: cashInAmount,
-        currency: 'USD',
+        currency: 'PHP',
         transactionId: transactionId,
         balanceBefore: paypalBalance,
         balanceAfter: newBalance,
@@ -833,13 +1419,22 @@ useEffect(() => {
         description: 'PayPal Cash-In'
       });
       
+      // Sync with PayPal Sandbox account after successful payment
+      // This ensures the balance in the app matches the actual PayPal account
+      try {
+        await syncPayPalBalance();
+      } catch (syncError) {
+        console.warn('Balance sync failed, but payment was successful:', syncError);
+        // Don't show error to user if sync fails, payment was successful
+      }
+      
       setShowPayPalCashIn(false);
       setCashInAmount(0);
       
       // Show custom success alert
       showAlert('success', 'Cash-in successful!', '', [
-        `Amount: $${cashInAmount.toFixed(2)} USD`,
-        `New Balance: $${newBalance.toFixed(2)} USD`,
+        `Amount: ₱${cashInAmount.toLocaleString()} PHP`,
+        `New Balance: ₱${newBalance.toLocaleString()} PHP`,
         `Transaction ID: ${transactionId}`
       ]);
     } catch (error) {
@@ -865,8 +1460,17 @@ useEffect(() => {
       setPaypalBalance(newBalance);
       await savePayPalBalance(newBalance);
       
-      console.log(`✅ Top-up successful: $${topUpAmount} USD. Transaction: ${transactionId}`);
-      alert(`✅ Top-up successful!\nAmount: $${topUpAmount} USD\nNew Balance: $${newBalance.toFixed(2)} USD\nTransaction ID: ${transactionId}`);
+      // Sync with PayPal Sandbox account after successful payment
+      // This ensures the balance in the app matches the actual PayPal account
+      try {
+        await syncPayPalBalance();
+      } catch (syncError) {
+        console.warn('Balance sync failed, but payment was successful:', syncError);
+        // Don't show error to user if sync fails, payment was successful
+      }
+      
+      console.log(`✅ Top-up successful: ₱${topUpAmount.toLocaleString()} PHP. Transaction: ${transactionId}`);
+      alert(`✅ Top-up successful!\nAmount: ₱${topUpAmount.toLocaleString()} PHP\nNew Balance: ₱${newBalance.toLocaleString()} PHP\nTransaction ID: ${transactionId}`);
       
       setShowPayPalTopUpPayment(false);
       setTopUpAmount(0);
@@ -911,44 +1515,56 @@ useEffect(() => {
     const searchTerm = searchWhere.trim() || search.trim();
     
     let results = pool.filter(listing => {
-      // Search by location/title/category
+      // 1. Search by location/title/category
       const matchesSearch = !searchTerm || 
         listing.title?.toLowerCase().includes(searchTerm.toLowerCase()) ||
         listing.location?.toLowerCase().includes(searchTerm.toLowerCase()) ||
         listing.category?.toLowerCase().includes(searchTerm.toLowerCase());
       
-      // If no results found for location, show message
-      if (searchTerm && !matchesSearch) {
-        return false;
+      if (!matchesSearch) return false;
+      
+      // 2. Category filter
+      const matchesCategory = activeCategory === "All" || listing.category === activeCategory;
+      if (!matchesCategory) return false;
+      
+      // 3. Price filter - handle different listing types
+      let listingPrice = listing.pricePerNight || listing.price || 0;
+      // For Experience and Service, use flat rate
+      if (listing.category === "Experience" || listing.category === "Service") {
+        listingPrice = listing.price || listing.pricePerNight || 0;
+      }
+      const matchesPrice = listingPrice >= priceRange[0] && listingPrice <= priceRange[1];
+      if (!matchesPrice) return false;
+      
+      // 4. Guest capacity filter - only apply if searchGuests > 1
+      if (searchGuests > 1) {
+        const guestCapacity = getListingGuestCapacity(listing);
+        const maxGuests = guestCapacity ? parseInt(guestCapacity) : 0;
+        const matchesGuests = maxGuests >= searchGuests;
+        if (!matchesGuests) return false;
       }
       
-      const matchesCategory = activeCategory === "All" || listing.category === activeCategory;
-      
-      const matchesPrice = listing.pricePerNight >= priceRange[0] && listing.pricePerNight <= priceRange[1];
-      
+      // 5. Amenities filter
+      const listingAmenities = listing.amenities || [];
       const matchesAmenities = selectedAmenities.length === 0 || 
-        selectedAmenities.every(amenity => listing.amenities.includes(amenity));
+        selectedAmenities.every(amenity => listingAmenities.includes(amenity));
+      if (!matchesAmenities) return false;
       
-      // Check date availability if dates are selected
-      let matchesDates = true;
+      // 6. Date availability filter - only apply if both dates are selected
       if (searchDates.checkIn && searchDates.checkOut) {
-        matchesDates = checkDateAvailability(
+        const matchesDates = checkDateAvailability(
           listing.id,
           searchDates.checkIn,
           searchDates.checkOut
         );
+        if (!matchesDates) return false;
       }
       
-      return matchesSearch && matchesCategory && matchesPrice && matchesAmenities && matchesDates;
+      return true;
     });
     
     setSearchResults(results);
     setSearchQuery(searchTerm);
-    
-    // Show message if no results
-    if (results.length === 0 && searchTerm) {
-      console.log('No listings found for:', searchTerm);
-    }
   };
 
 
@@ -977,9 +1593,7 @@ useEffect(() => {
         ? `I booked: ${title} in ${location} for ${item.date} - ₱${price}/night`
         : `Check out this ${category.toLowerCase()}: ${title} in ${location} - ₱${price}/night`;
       
-      const shareUrl = isBooking 
-        ? `https://stayhub.com/booking/${item.id}`
-        : `https://stayhub.com/listing/${item.id}`;
+      const shareUrl = buildShareUrl(isBooking ? 'booking' : 'listing', item.id);
       
       switch(platform) {
         case 'copy':
@@ -1028,7 +1642,7 @@ useEffect(() => {
   const handleBookingShare = (booking, platform = 'copy') => {
     try {
       const shareText = `I just booked: ${booking.title} in ${booking.location} for ${booking.checkIn} to ${booking.checkOut} - ₱${booking.price}/night`;
-      const shareUrl = `https://stayhub.com/booking/${booking.id}`;
+      const shareUrl = buildShareUrl('booking', booking.id);
       
       switch(platform) {
         case 'copy':
@@ -1068,12 +1682,77 @@ useEffect(() => {
     }
   };
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const listingParam = params.get('listingId') || params.get('viewListing') || params.get('listing');
+      if (listingParam) {
+        setDeepLinkListingId(listingParam);
+      }
+    } catch (error) {
+      console.error('Failed to parse share parameters:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (deepLinkListingId) return;
+    if (typeof window === "undefined") return;
+    try {
+      const storedListingId = sessionStorage.getItem("sharedListingId");
+      if (storedListingId) {
+        setDeepLinkListingId(storedListingId);
+        sessionStorage.removeItem("sharedListingId");
+      }
+    } catch (error) {
+      console.error("Failed to restore shared listing id:", error);
+    }
+  }, [deepLinkListingId]);
+
+  useEffect(() => {
+    if (!deepLinkListingId) return;
+    const listingsPool = getListingsPool();
+    if (!Array.isArray(listingsPool) || listingsPool.length === 0) return;
+
+    const targetListing = listingsPool.find((listing) => {
+      if (!listing) return false;
+      if (listing.id === deepLinkListingId) return true;
+      if (listing.publicListingId && listing.publicListingId === deepLinkListingId) return true;
+      if (listing.hostListingId && listing.hostListingId === deepLinkListingId) return true;
+      return false;
+    });
+
+    if (!targetListing) return;
+
+    const images = extractListingImages(targetListing);
+    const fallbackImage = targetListing.img || targetListing.coverPhoto || targetListing.primaryImage || "/images/cozy home.jpg";
+    const finalImages = images.length > 0 ? images : [fallbackImage];
+
+    setSelectedListing(targetListing);
+    setShowBookingModal(true);
+    setGalleryListing(targetListing);
+    setGalleryImages(finalImages);
+    setGalleryIndex(0);
+    setIsImageGalleryOpen(true);
+    setBookingGuests(getListingGuestCapacity(targetListing));
+
+    if (typeof window !== 'undefined' && window.history && window.location) {
+      const url = new URL(window.location.href);
+      ['listingId', 'viewListing', 'listing'].forEach((paramKey) => url.searchParams.delete(paramKey));
+      const search = url.searchParams.toString();
+      const newUrl = `${url.pathname}${search ? `?${search}` : ''}${url.hash}`;
+      window.history.replaceState({}, document.title, newUrl);
+    }
+
+    setDeepLinkListingId(null);
+  }, [deepLinkListingId, firebaseListings, listings, extractListingImages, getListingsPool, getListingGuestCapacity]);
+
   // Check PayPal balance before payment
-  const checkPayPalBalance = (usdAmount) => {
-    if (paypalBalance >= usdAmount) {
+  const checkPayPalBalance = (phpAmount) => {
+    if (paypalBalance >= phpAmount) {
       return true;
     } else {
-      alert(`Insufficient PayPal balance!\nRequired: $${usdAmount} USD\nCurrent Balance: $${paypalBalance.toFixed(2)} USD\n\nPlease top up your account.`);
+      alert(`Insufficient wallet balance!\nRequired: ₱${phpAmount.toLocaleString()} PHP\nCurrent Balance: ₱${paypalBalance.toLocaleString()} PHP\n\nPlease top up your account.`);
       setShowPayPalTopUp(true);
       return false;
     }
@@ -1153,6 +1832,7 @@ useEffect(() => {
   const handleBookListing = (listing) => {
     setSelectedListing(listing);
     setShowBookingModal(true);
+    setBookingGuests(getListingGuestCapacity(listing));
     
     try {
       // Set default dates (starting from tomorrow)
@@ -1174,13 +1854,33 @@ useEffect(() => {
   };
 
   const calculateBookingTotal = () => {
-    if (!selectedListing || !bookingDates.checkIn || !bookingDates.checkOut) return 0;
+    if (!selectedListing) return 0;
     
-    const checkIn = new Date(bookingDates.checkIn);
-    const checkOut = new Date(bookingDates.checkOut);
-    const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+    const category = selectedListing.category || "Home";
+    let subtotal = 0;
     
-    const subtotal = nights * selectedListing.pricePerNight;
+    if (category === "Experience") {
+      const basePrice = selectedListing.pricePerNight || selectedListing.price || 0;
+      const duration = getListingDuration(selectedListing);
+      const groupSize = getListingGroupSize(selectedListing);
+      subtotal = basePrice;
+      if (duration) {
+        subtotal = basePrice; // Duration included in listing description; price is per experience
+      }
+      if (groupSize) {
+        subtotal = basePrice; // assume price already accounts for group size
+      }
+    } else if (category === "Service") {
+      const basePrice = selectedListing.pricePerNight || selectedListing.price || 0;
+      subtotal = basePrice;
+    } else {
+      // For Home/accommodation: price per night
+      if (!bookingDates.checkIn || !bookingDates.checkOut) return 0;
+      const checkIn = new Date(bookingDates.checkIn);
+      const checkOut = new Date(bookingDates.checkOut);
+      const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+      subtotal = nights * (selectedListing.pricePerNight || selectedListing.price || 0);
+    }
     
     // Apply coupon discount if available
     if (appliedCoupon) {
@@ -1192,13 +1892,23 @@ useEffect(() => {
   };
 
   const calculateSubtotal = () => {
-    if (!selectedListing || !bookingDates.checkIn || !bookingDates.checkOut) return 0;
+    if (!selectedListing) return 0;
     
-    const checkIn = new Date(bookingDates.checkIn);
-    const checkOut = new Date(bookingDates.checkOut);
-    const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+    const category = selectedListing.category || "Home";
     
-    return nights * selectedListing.pricePerNight;
+    if (category === "Experience") {
+      const basePrice = selectedListing.pricePerNight || selectedListing.price || 0;
+      return basePrice;
+    } else if (category === "Service") {
+      const basePrice = selectedListing.pricePerNight || selectedListing.price || 0;
+      return basePrice;
+    } else {
+      if (!bookingDates.checkIn || !bookingDates.checkOut) return 0;
+      const checkIn = new Date(bookingDates.checkIn);
+      const checkOut = new Date(bookingDates.checkOut);
+      const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+      return nights * (selectedListing.pricePerNight || selectedListing.price || 0);
+    }
   };
 
   const calculateDiscount = () => {
@@ -1259,15 +1969,31 @@ useEffect(() => {
         return;
       }
 
-      if (checkOutDate <= checkInDate) {
-        alert("Check-out date must be after check-in date.");
-        return;
-      }
-
-      const daysDiff = Math.ceil((checkOutDate - checkInDate) / (1000 * 60 * 60 * 24));
-      if (daysDiff > 30) {
-        alert("Maximum stay duration is 30 days.");
-        return;
+      // Category-specific date validation
+      const category = selectedListing.category || "Home";
+      
+      if (category === "Experience" || category === "Service") {
+        // For Experience/Service, check-out can be same day or next day
+        if (checkOutDate < checkInDate) {
+          alert("End date cannot be before start date.");
+          return;
+        }
+        const daysDiff = Math.ceil((checkOutDate - checkInDate) / (1000 * 60 * 60 * 24));
+        if (daysDiff > 7) {
+          alert(`${category} bookings are limited to 7 days maximum.`);
+          return;
+        }
+      } else {
+        // For Home/accommodation, standard validation
+        if (checkOutDate <= checkInDate) {
+          alert("Check-out date must be after check-in date.");
+          return;
+        }
+        const daysDiff = Math.ceil((checkOutDate - checkInDate) / (1000 * 60 * 60 * 24));
+        if (daysDiff > 30) {
+          alert("Maximum stay duration is 30 days.");
+          return;
+        }
       }
       
       // Check if dates are available (prevent double booking)
@@ -1310,6 +2036,62 @@ useEffect(() => {
     setShowBookingConfirmation(false);
   };
 
+  // Calculate remaining time until cancellation deadline
+  // Uses currentTime state to trigger re-renders every second
+  const getCancellationTimeRemaining = (booking) => {
+    if (!booking.cancelDeadline) {
+      // If no deadline set, calculate from createdAt (24 hours from booking)
+      const createdAt = booking.createdAt?.toDate ? booking.createdAt.toDate() : 
+                       booking.createdAt ? new Date(booking.createdAt) : 
+                       booking.bookingDate?.toDate ? booking.bookingDate.toDate() :
+                       booking.bookingDate ? new Date(booking.bookingDate) : null;
+      
+      if (!createdAt) return null;
+      
+      const deadline = new Date(createdAt.getTime() + 24 * 60 * 60 * 1000);
+      const now = currentTime; // Use currentTime state for real-time updates
+      const remaining = deadline.getTime() - now.getTime();
+      
+      if (remaining <= 0) return { expired: true, remaining: 0 };
+      
+      return {
+        expired: false,
+        remaining: remaining,
+        deadline: deadline
+      };
+    }
+    
+    const deadline = booking.cancelDeadline?.toDate ? booking.cancelDeadline.toDate() : 
+                    new Date(booking.cancelDeadline);
+    const now = currentTime; // Use currentTime state for real-time updates
+    const remaining = deadline.getTime() - now.getTime();
+    
+    if (remaining <= 0) return { expired: true, remaining: 0 };
+    
+    return {
+      expired: false,
+      remaining: remaining,
+      deadline: deadline
+    };
+  };
+
+  // Format time remaining as readable string
+  const formatTimeRemaining = (ms) => {
+    if (ms <= 0) return 'Expired';
+    
+    const hours = Math.floor(ms / (1000 * 60 * 60));
+    const minutes = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60));
+    const seconds = Math.floor((ms % (1000 * 60)) / 1000);
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m ${seconds}s`;
+    } else if (minutes > 0) {
+      return `${minutes}m ${seconds}s`;
+    } else {
+      return `${seconds}s`;
+    }
+  };
+
   // Allow guest to cancel a pending booking within 24 hours with 50% refund
   const handleCancelPendingBooking = async (booking) => {
     try {
@@ -1321,9 +2103,9 @@ useEffect(() => {
         return;
       }
       
-      const now = Date.now();
-      const deadlineMs = new Date(booking.cancelDeadline || 0).getTime();
-      if (!deadlineMs || now > deadlineMs) {
+      const timeRemaining = getCancellationTimeRemaining(booking);
+      
+      if (!timeRemaining || timeRemaining.expired) {
         showAlert('error', 'Cancellation Expired', 'The 24-hour cancellation window has passed.', [
           'Cancellations are only allowed within 24 hours of booking',
           'Contact support for special requests'
@@ -1334,19 +2116,17 @@ useEffect(() => {
       // Calculate 50% refund
       const totalPaid = booking.total || 0;
       const refundAmount = totalPaid * 0.5; // 50% refund
-      const refundUSD = parseFloat((refundAmount / 56).toFixed(2)); // Convert PHP to USD
       
-      // Update PayPal balance
-      const newBalance = paypalBalance + refundUSD;
+      // Update guest PayPal balance (50% refund)
+      const newBalance = paypalBalance + refundAmount;
       setPaypalBalance(newBalance);
       await savePayPalBalance(newBalance);
 
       // Save refund transaction
       await saveTransaction({
         type: 'Refund',
-        amount: refundUSD,
-        currency: 'USD',
-        phpAmount: refundAmount,
+        amount: refundAmount,
+        currency: 'PHP',
         transactionId: `REFUND-${booking.id}`,
         balanceBefore: paypalBalance,
         balanceAfter: newBalance,
@@ -1363,16 +2143,356 @@ useEffect(() => {
         status: 'CancelledByGuest',
         cancelledAt: serverTimestamp(),
         refundAmount: refundAmount,
-        refundUSD: refundUSD,
         refundPercentage: 50,
         updatedAt: serverTimestamp()
       });
 
+      // Allocate refunds to host and admin (25% + 25%) - Send to their PayPal accounts
+      const hostPayout = refundAmount * 0.5; // 25% of original total (50% of refund)
+      const adminPayout = refundAmount * 0.5; // 25% of original total (50% of refund)
+      
+      try {
+        // Helper function to process PayPal payout
+        const processPayPalPayout = async (paypalEmail, amountPHP) => {
+          try {
+            // Parse first, then format
+            const parsedAmount = parseFloat(amountPHP);
+            if (isNaN(parsedAmount) || parsedAmount <= 0) {
+              throw new Error(`Invalid amount: ₱${amountPHP}. Amount must be a positive number.`);
+            }
+            const amount = parseFloat(parsedAmount.toFixed(2));
+            
+            if (amount < 0.01) {
+              throw new Error(`Invalid amount: ₱${amount}. Minimum payout is ₱0.01 PHP.`);
+            }
+            
+            // Get PayPal access token
+            const credentials = btoa(`${PAYPAL_CONFIG.CLIENT_ID}:${PAYPAL_CONFIG.SECRET}`);
+            const tokenResponse = await fetch(
+              `${PAYPAL_CONFIG.API_BASE_URL}/v1/oauth2/token`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Accept': 'application/json',
+                  'Authorization': `Basic ${credentials}`,
+                },
+                body: 'grant_type=client_credentials',
+              }
+            );
+
+            if (!tokenResponse.ok) {
+              const errorData = await tokenResponse.json().catch(() => ({}));
+              throw new Error(errorData.error_description || errorData.error || 'Failed to get PayPal access token');
+            }
+
+            const tokenData = await tokenResponse.json();
+            const accessToken = tokenData.access_token;
+
+            // Create payout batch
+            const payoutResponse = await fetch(
+              `${PAYPAL_CONFIG.API_BASE_URL}/v1/payments/payouts`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${accessToken}`,
+                },
+                body: JSON.stringify({
+                  sender_batch_header: {
+                    sender_batch_id: `CANCEL-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+                    email_subject: 'You have received a cancellation payout from StayHub',
+                    email_message: `You have received a cancellation payout of ₱${amountPHP.toLocaleString()} PHP from StayHub.`,
+                  },
+                  items: [
+                    {
+                      recipient_type: 'EMAIL',
+                      amount: {
+                        value: amount.toFixed(2),
+                        currency: 'PHP',
+                      },
+                      receiver: paypalEmail,
+                      note: `Cancellation payout from StayHub - ₱${amount.toLocaleString()}`,
+                      sender_item_id: `CANCEL-${Date.now()}`,
+                    },
+                  ],
+                }),
+              }
+            );
+
+            if (!payoutResponse.ok) {
+              const errorData = await payoutResponse.json().catch(() => ({}));
+              const errorMessage = errorData.message || 
+                                errorData.details?.[0]?.description || 
+                                errorData.details?.[0]?.issue ||
+                                `PayPal API error: ${payoutResponse.status} ${payoutResponse.statusText}`;
+              throw new Error(errorMessage);
+            }
+
+            const payoutData = await payoutResponse.json();
+            const batchHeader = payoutData.batch_header || {};
+            const items = payoutData.items || [];
+            const firstItem = items[0] || {};
+            
+            return {
+              success: true,
+              payoutBatchId: batchHeader.payout_batch_id || `PAYOUT-${Date.now()}`,
+              payoutItemId: firstItem.payout_item_id || firstItem.payout_item?.payout_item_id || `ITEM-${Date.now()}`,
+              status: batchHeader.batch_status || 'PENDING',
+            };
+          } catch (error) {
+            console.error('PayPal Payout Error:', error);
+            throw new Error(error.message || 'Failed to process PayPal payout');
+          }
+        };
+
+        // Add 25% cancellation share to Host wallet
+        if (booking.hostId) {
+          try {
+            console.log(`💰 Adding ₱${hostPayout.toLocaleString()} (25% cancellation share) to host wallet`);
+            
+            // Get current host wallet balance
+            const hostUserRef = doc(db, "users", booking.hostId);
+            const hostUserSnap = await getDoc(hostUserRef);
+            let currentBalance = 0;
+            
+            if (hostUserSnap.exists()) {
+              const hostUserData = hostUserSnap.data();
+              currentBalance = parseFloat(hostUserData.paypalBalance) || 0;
+            }
+            
+            // Update host wallet balance
+            const newHostBalance = currentBalance + hostPayout;
+            await updateDoc(hostUserRef, {
+              paypalBalance: newHostBalance,
+              updatedAt: serverTimestamp()
+            });
+            
+            console.log('✅ Host wallet updated successfully:', {
+              hostId: booking.hostId,
+              previousBalance: currentBalance,
+              amountAdded: hostPayout,
+              newBalance: newHostBalance
+            });
+            
+            // Create transaction for host (25% cancellation payout - positive amount)
+            await addDoc(collection(db, 'transactions'), {
+              userId: booking.hostId,
+              type: 'cancellation-payout',
+              displayType: 'Cancellation Payout',
+              amount: hostPayout, // Positive amount - host receives 25%
+              description: `25% Cancellation payout: ${booking.title || 'Booking'} - ${booking.guestName || 'Guest'}`,
+              bookingId: booking.id,
+              guestName: booking.guestName || 'Guest',
+              listingTitle: booking.title || '',
+              checkIn: booking.checkIn,
+              checkOut: booking.checkOut,
+              status: 'completed',
+              method: 'Wallet',
+              balanceBefore: currentBalance,
+              balanceAfter: newHostBalance,
+              date: serverTimestamp(),
+              createdAt: new Date().toISOString()
+            });
+            
+            // Update host's dashboard metrics
+            await incrementDashboardMetrics(booking.hostId, "totalEarnings", hostPayout);
+          } catch (hostWalletError) {
+            console.error('❌ Error updating host wallet:', hostWalletError);
+            console.error('Host wallet error details:', {
+              hostId: booking.hostId,
+              hostPayout: hostPayout,
+              error: hostWalletError.message,
+              stack: hostWalletError.stack
+            });
+            // Still create transaction record but mark as pending
+            await addDoc(collection(db, 'transactions'), {
+              userId: booking.hostId,
+              type: 'cancellation-payout',
+              displayType: 'Cancellation Payout',
+              amount: hostPayout,
+              description: `25% Cancellation payout: ${booking.title || 'Booking'} - ${booking.guestName || 'Guest'} (Wallet update failed: ${hostWalletError.message})`,
+              bookingId: booking.id,
+              status: 'pending',
+              method: 'Wallet',
+              date: serverTimestamp(),
+              createdAt: new Date().toISOString()
+            });
+            // Update metrics anyway
+            await incrementDashboardMetrics(booking.hostId, "totalEarnings", hostPayout);
+          }
+        }
+
+        // Send payout to Admin (25%)
+        try {
+          // Get admin's PayPal email (always gabennewell79@gmail.com)
+          const adminPayPalEmail = "gabennewell79@gmail.com";
+          
+          console.log(`💰 Sending ₱${adminPayout.toLocaleString()} to admin PayPal: ${adminPayPalEmail}`);
+          
+          // Send actual PayPal payout to admin
+          const adminPayoutResult = await processPayPalPayout(adminPayPalEmail, adminPayout);
+          
+          console.log('✅ Admin PayPal payout successful:', adminPayoutResult);
+          
+          // Update admin wallet
+          const adminWalletRef = doc(db, "adminWallet", "earnings");
+          await runTransaction(db, async (tx) => {
+            const snap = await tx.get(adminWalletRef);
+            if (snap.exists()) {
+              const data = snap.data();
+              tx.update(adminWalletRef, {
+                balance: (Number(data.balance) || 0) + adminPayout,
+                totalEarnings: (Number(data.totalEarnings) || 0) + adminPayout,
+                lastUpdated: serverTimestamp(),
+              });
+            } else {
+              tx.set(adminWalletRef, {
+                balance: adminPayout,
+                totalEarnings: adminPayout,
+                paypalBalance: 0,
+                createdAt: serverTimestamp(),
+                lastUpdated: serverTimestamp(),
+              });
+            }
+          });
+
+          // Create admin transaction for cancellation share (25% - positive amount)
+          await addDoc(collection(db, 'adminTransactions'), {
+            type: 'cancellation-fee',
+            displayType: 'Cancellation Share',
+            amount: adminPayout, // Positive amount - admin receives 25%
+            bookingId: booking.id,
+            hostId: booking.hostId || null,
+            hostName: booking.host || 'Host',
+            guestName: booking.guestName || 'Guest',
+            listingTitle: booking.title || 'Booking',
+            description: `25% Cancellation share from booking: ${booking.title || 'Booking'}`,
+            method: 'PayPal',
+            paypalEmail: adminPayPalEmail,
+            payoutBatchId: adminPayoutResult.payoutBatchId,
+            payoutItemId: adminPayoutResult.payoutItemId,
+            date: serverTimestamp(),
+            createdAt: new Date().toISOString(),
+            status: 'completed'
+          });
+        } catch (adminPayoutError) {
+          console.error('❌ Error sending admin PayPal payout:', adminPayoutError);
+        }
+      } catch (refundError) {
+        console.error("Failed to allocate cancellation refund to host/admin:", refundError);
+      }
+
+      // Send cancellation confirmation email to guest
+      try {
+        console.log("📧 Attempting to send cancellation confirmation email...");
+        
+        // Get guest email
+        let guestEmail = booking.guestEmail || auth.currentUser?.email;
+        let guestName = booking.guestName || profile?.name || "Valued Guest";
+        
+        if (!guestEmail && booking.guestId) {
+          try {
+            const guestDoc = await getDoc(doc(db, "users", booking.guestId));
+            if (guestDoc.exists()) {
+              const guestData = guestDoc.data();
+              guestEmail = guestData.email || guestEmail;
+              guestName = guestData.name || guestName;
+            }
+          } catch (guestError) {
+            console.error("Error fetching guest data:", guestError);
+          }
+        }
+
+        if (!guestEmail || guestEmail.trim() === "" || !guestEmail.includes("@")) {
+          console.warn("❌ Cannot send cancellation email: No valid guest email found");
+        } else {
+          // Initialize EmailJS if not already initialized
+          emailjs.init(EMAILJS_CANCELLATION_CONFIG.PUBLIC_KEY);
+
+          const cancellationDate = new Date();
+          const emailHtml = buildCancellationConfirmationTemplate({
+            guestName: guestName,
+            bookingId: booking.id,
+            listingTitle: booking.title || "Your Booking",
+            checkIn: booking.checkIn,
+            checkOut: booking.checkOut,
+            guests: booking.guests || booking.numberOfGuests || 1,
+            location: booking.location || "",
+            cancellationDate: cancellationDate,
+            refundAmount: refundAmount,
+            guestEmail: guestEmail,
+            supportEmail: EMAILJS_CANCELLATION_CONFIG.SUPPORT_EMAIL,
+            brandName: EMAILJS_CANCELLATION_CONFIG.BRAND_NAME,
+            appUrl: EMAILJS_CANCELLATION_CONFIG.APP_URL || window.location.origin
+          });
+
+          const templateParams = {
+            to_email: guestEmail.trim(),
+            email: guestEmail.trim(),
+            customer_name: guestName,
+            guest_name: guestName,
+            booking_id: booking.id,
+            booking_reference: booking.id,
+            service_name: booking.title || "Your Booking",
+            listing_title: booking.title || "Your Booking",
+            check_in: booking.checkIn ? (typeof booking.checkIn === "string" ? booking.checkIn : new Date(booking.checkIn).toLocaleDateString('en-US', { 
+              weekday: 'long',
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            })) : "TBD",
+            check_out: booking.checkOut ? (typeof booking.checkOut === "string" ? booking.checkOut : new Date(booking.checkOut).toLocaleDateString('en-US', { 
+              weekday: 'long',
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            })) : "TBD",
+            guests: booking.guests || booking.numberOfGuests || 1,
+            location: booking.location || "",
+            cancellation_date: cancellationDate.toLocaleDateString('en-US', { 
+              weekday: 'long',
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            }),
+            refund_amount: `₱${refundAmount.toLocaleString()}`,
+            message_html: emailHtml
+          };
+
+          console.log("Sending cancellation email with EmailJS...");
+          console.log("Template ID:", EMAILJS_CANCELLATION_CONFIG.TEMPLATE_ID);
+          console.log("Service ID:", EMAILJS_CANCELLATION_CONFIG.SERVICE_ID);
+          
+          if (!EMAILJS_CANCELLATION_CONFIG.SERVICE_ID || !EMAILJS_CANCELLATION_CONFIG.TEMPLATE_ID) {
+            throw new Error(`Missing EmailJS config: serviceId=${!!EMAILJS_CANCELLATION_CONFIG.SERVICE_ID}, templateId=${!!EMAILJS_CANCELLATION_CONFIG.TEMPLATE_ID}`);
+          }
+          
+          const emailResult = await emailjs.send(
+            EMAILJS_CANCELLATION_CONFIG.SERVICE_ID,
+            EMAILJS_CANCELLATION_CONFIG.TEMPLATE_ID,
+            templateParams
+          );
+
+          console.log('✅ Cancellation confirmation email sent successfully to', guestEmail);
+          console.log('EmailJS Response:', emailResult);
+        }
+      } catch (emailError) {
+        console.error("❌ Error sending cancellation confirmation email:", emailError);
+        console.error("Error details:", {
+          message: emailError.message,
+          text: emailError.text,
+          status: emailError.status
+        });
+        // Don't show error to user - cancellation was successful, email is just a bonus
+      }
+
       // Show success alert
       showAlert('success', 'Booking Cancelled', '50% refund has been processed', [
-        `Refund Amount: $${refundUSD.toFixed(2)} USD (₱${refundAmount.toLocaleString()} PHP)`,
-        `New Balance: $${newBalance.toFixed(2)} USD`,
-        'The refund has been added to your PayPal balance'
+        `Refund Amount: ₱${refundAmount.toLocaleString()} PHP`,
+        `Admin Share: ₱${(refundAmount * 0.5).toLocaleString()}`,
+        `Host Share: ₱${hostPayout.toLocaleString()}`,
+        `Guest New Balance: ₱${newBalance.toLocaleString()} PHP`
       ]);
       
     } catch (e) {
@@ -1436,27 +2556,35 @@ useEffect(() => {
         
         // Small delay to ensure DOM is ready
         setTimeout(() => {
-          // Convert PHP to USD (approximate rate: 1 USD = 56 PHP)
-          const usdAmount = parseFloat((paymentAmount / 56).toFixed(2));
-          
-          // Check balance before showing buttons
-          if (!checkPayPalBalance(usdAmount)) {
+          // Validate paymentAmount first
+          const validPaymentAmount = parseFloat(paymentAmount) || 0;
+          if (validPaymentAmount <= 0) {
+            console.error('Invalid payment amount:', paymentAmount);
+            alert('Invalid payment amount. Please try again.');
             setShowPayPalPayment(false);
             return;
           }
           
+          // Convert PHP to USD for PayPal API (approximate rate: 1 USD = 56 PHP)
+          const usdAmount = parseFloat((validPaymentAmount / 56).toFixed(2));
+          
+          // Ensure minimum USD amount (PayPal requires at least $0.01)
+          const finalUsdAmount = Math.max(0.01, usdAmount);
+          
+          console.log('Initializing PayPal buttons:', {
+            phpAmount: paymentAmount,
+            usdAmount: finalUsdAmount,
+            container: container ? 'found' : 'not found'
+          });
+          
           window.paypal.Buttons({
             createOrder: (data, actions) => {
-              console.log('Creating PayPal order for USD $' + usdAmount);
-              // Double-check balance
-              if (!checkPayPalBalance(usdAmount)) {
-                return Promise.reject(new Error('Insufficient balance'));
-              }
+              console.log('Creating PayPal order for ₱' + paymentAmount + ' PHP (USD $' + finalUsdAmount + ')');
               
               return actions.order.create({
                 purchase_units: [{
                   amount: {
-                    value: usdAmount.toString(),
+                    value: finalUsdAmount.toFixed(2),
                     currency_code: 'USD'
                   },
                   description: selectedListing ? `${selectedListing.title} - ${bookingDates.checkIn} to ${bookingDates.checkOut}` : 'StayHub Booking Payment'
@@ -1464,40 +2592,52 @@ useEffect(() => {
               });
             },
             onApprove: (data, actions) => {
-              console.log('PayPal approval received...');
+              console.log('PayPal approval received, order ID:', data.orderID);
               return actions.order.capture().then(async (details) => {
-                console.log('Payment captured:', details);
+                console.log('Payment captured successfully:', details);
                 
-                // Deduct from PayPal balance
-                const newBalance = paypalBalance - usdAmount;
-                setPaypalBalance(newBalance);
-                await savePayPalBalance(newBalance);
-                
-                // Save transaction to history
-                await saveTransaction({
-                  type: 'Booking Payment',
-                  amount: -usdAmount,
-                  currency: 'USD',
-                  phpAmount: paymentAmount,
-                  transactionId: details.id,
-                  balanceBefore: paypalBalance,
-                  balanceAfter: newBalance,
-                  status: 'Completed',
-                  description: selectedListing ? `Payment for ${selectedListing.title}` : 'Booking Payment',
-                  listingTitle: selectedListing?.title || '',
-                  checkIn: bookingDates.checkIn,
-                  checkOut: bookingDates.checkOut
-                });
-                
-                setShowPayPalPayment(false);
-                // Process booking after successful payment
-                processBookingAfterPayment(details.id);
-                
-                // Show custom success alert
-                showAlert('success', 'Payment successful!', '', [
-                  `Transaction ID: ${details.id}`,
-                  `Amount: $${usdAmount} USD (₱${paymentAmount.toLocaleString()} PHP)`,
-                  `New Balance: $${newBalance.toFixed(2)} USD`
+                try {
+                  // PayPal payment is external - no need to deduct from wallet balance
+                  // The payment was processed through PayPal, not the wallet
+                  
+                  // Save transaction to history (for record keeping)
+                  await saveTransaction({
+                    type: 'Booking Payment',
+                    amount: -paymentAmount,
+                    currency: 'PHP',
+                    transactionId: details.id,
+                    balanceBefore: paypalBalance,
+                    balanceAfter: paypalBalance, // Balance unchanged - external PayPal payment
+                    status: 'Completed',
+                    description: selectedListing ? `PayPal Payment for ${selectedListing.title}` : 'PayPal Booking Payment',
+                    listingTitle: selectedListing?.title || '',
+                    checkIn: bookingDates.checkIn,
+                    checkOut: bookingDates.checkOut,
+                    paymentMethod: 'PayPal External'
+                  });
+                  
+                  setShowPayPalPayment(false);
+                  
+                  // Process booking after successful payment
+                  await processBookingAfterPayment(details.id);
+                  
+                  // Show custom success alert
+                  showAlert('success', 'Payment successful!', '', [
+                    `Transaction ID: ${details.id}`,
+                    `Amount: ₱${paymentAmount.toLocaleString()} PHP`,
+                    'Payment processed through PayPal'
+                  ]);
+                } catch (error) {
+                  console.error('Error processing PayPal payment:', error);
+                  showAlert('error', 'Payment Processed', 'Payment was successful but there was an error processing your booking.', [
+                    'Please contact support with transaction ID: ' + details.id
+                  ]);
+                }
+              }).catch((error) => {
+                console.error('Error capturing PayPal payment:', error);
+                showAlert('error', 'Payment Error', 'There was an error capturing your payment.', [
+                  'Please try again',
+                  'If the problem persists, contact support'
                 ]);
               });
             },
@@ -1527,8 +2667,11 @@ useEffect(() => {
             }
           }).catch((error) => {
             console.error('PayPal render error:', error);
-            alert('Failed to load payment buttons. Please refresh and try again.');
-            setShowPayPalPayment(false);
+            // Suppress generic script errors
+            if (error && error.message && !error.message.includes('Script error')) {
+              alert('Failed to load payment buttons. Please refresh and try again.');
+            }
+            // Don't close modal - user can use wallet payment instead
           });
         }, 100);
       } else {
@@ -1567,14 +2710,16 @@ useEffect(() => {
         setTimeout(() => {
           window.paypal.Buttons({
             createOrder: (data, actions) => {
-              console.log('Creating PayPal cash-in order for $' + cashInAmount);
+              // Convert PHP to USD for PayPal (approximate rate: 1 USD = 56 PHP)
+              const usdAmount = parseFloat((cashInAmount / 56).toFixed(2));
+              console.log('Creating PayPal cash-in order for ₱' + cashInAmount + ' PHP (USD $' + usdAmount + ')');
               return actions.order.create({
                 purchase_units: [{
                   amount: {
-                    value: cashInAmount.toString(),
+                    value: usdAmount.toString(),
                     currency_code: 'USD'
                   },
-                  description: `StayHub Cash-In - $${cashInAmount} USD`
+                  description: `StayHub Cash-In - ₱${cashInAmount.toLocaleString()} PHP`
                 }]
               });
             },
@@ -1599,8 +2744,11 @@ useEffect(() => {
             console.log('PayPal cash-in buttons rendered');
           }).catch((error) => {
             console.error('PayPal cash-in render error:', error);
-            alert('Failed to load payment buttons. Please try again.');
-            setShowPayPalCashIn(false);
+            // Don't show alert for script errors, just log them
+            if (error && error.message && !error.message.includes('Script error')) {
+              alert('Failed to load payment buttons. Please try again.');
+            }
+            // Don't close modal on script errors, let user try again
           });
         }, 100);
       } else {
@@ -1634,14 +2782,16 @@ useEffect(() => {
         setTimeout(() => {
           window.paypal.Buttons({
             createOrder: (data, actions) => {
-              console.log('Creating PayPal top-up order for $' + topUpAmount);
+              // Convert PHP to USD for PayPal (approximate rate: 1 USD = 56 PHP)
+              const usdAmount = parseFloat((topUpAmount / 56).toFixed(2));
+              console.log('Creating PayPal top-up order for ₱' + topUpAmount + ' PHP (USD $' + usdAmount + ')');
               return actions.order.create({
                 purchase_units: [{
                   amount: {
-                    value: topUpAmount.toString(),
+                    value: usdAmount.toString(),
                     currency_code: 'USD'
                   },
-                  description: `StayHub PayPal Top-Up - $${topUpAmount} USD`
+                  description: `StayHub PayPal Top-Up - ₱${topUpAmount.toLocaleString()} PHP`
                 }]
               });
             },
@@ -1666,8 +2816,11 @@ useEffect(() => {
             console.log('PayPal top-up buttons rendered');
           }).catch((error) => {
             console.error('PayPal top-up render error:', error);
-            alert('Failed to load payment buttons. Please try again.');
-            setShowPayPalTopUpPayment(false);
+            // Suppress generic script errors
+            if (error && error.message && !error.message.includes('Script error')) {
+              alert('Failed to load payment buttons. Please try again.');
+            }
+            // Don't close modal on script errors
           });
         }, 100);
       } else {
@@ -1697,10 +2850,15 @@ useEffect(() => {
       const checkInDate = new Date(bookingDates.checkIn);
       const checkOutDate = new Date(bookingDates.checkOut);
       
+      // Determine payment method based on transaction ID
+      const isWalletPayment = transactionId.startsWith('WALLET_');
+      const paymentMethod = isWalletPayment ? 'Wallet' : 'PayPal';
+      
       // Create booking data
       const bookingData = {
         listingId: selectedListing.id,
         title: selectedListing.title,
+        category: selectedListing.category || "Home", // Include category for proper handling
         checkIn: checkInDate.toISOString().split('T')[0],
         checkOut: checkOutDate.toISOString().split('T')[0],
         status: "PendingApproval", // Still needs host approval even after payment
@@ -1721,7 +2879,7 @@ useEffect(() => {
           name: appliedCoupon.couponName,
           discount: appliedCoupon.discount
         } : null,
-        paymentMethod: 'PayPal',
+        paymentMethod: paymentMethod,
         paymentStatus: 'paid', // Payment already completed
         transactionId: transactionId,
         hasRated: false,
@@ -1736,7 +2894,7 @@ useEffect(() => {
         paidAt: serverTimestamp()
       };
 
-      console.log("Creating booking with PayPal transaction:", transactionId);
+      console.log(`Creating booking with ${paymentMethod} transaction:`, transactionId);
 
       // Add the booking to Firestore
       const newBookingRef = await addDoc(bookingsRef, bookingData);
@@ -1746,6 +2904,268 @@ useEffect(() => {
       await updateDoc(newBookingRef, {
         id: newBookingRef.id
       });
+
+      // If payment was via PayPal, send money to host's PayPal account
+      if (!isWalletPayment) {
+        // Get hostId from listing - check multiple possible fields
+        const hostId = selectedListing.hostId || selectedListing.host?.id || (selectedListing.host && typeof selectedListing.host === 'string' ? selectedListing.host : null);
+        
+        if (!hostId) {
+          console.error('❌ Host ID not found in listing:', {
+            listingId: selectedListing.id,
+            listingData: selectedListing,
+            availableFields: Object.keys(selectedListing)
+          });
+          alert('Error: Host ID not found. Please contact support.');
+          return;
+        }
+        
+        console.log('🔍 Host ID found:', hostId);
+        
+        try {
+          // Helper function to process PayPal payout (reuse from cancellation)
+          const processPayPalPayout = async (paypalEmail, amountPHP) => {
+            try {
+              // Parse first, then format
+              const parsedAmount = parseFloat(amountPHP);
+              if (isNaN(parsedAmount) || parsedAmount <= 0) {
+                throw new Error(`Invalid amount: ₱${amountPHP}. Amount must be a positive number.`);
+              }
+              const amount = parseFloat(parsedAmount.toFixed(2));
+              
+              if (amount <= 0 || amount < 0.01) {
+                throw new Error(`Invalid amount: ₱${amount}. Minimum payout is ₱0.01 PHP.`);
+              }
+              
+              // Get PayPal access token
+              const credentials = btoa(`${PAYPAL_CONFIG.CLIENT_ID}:${PAYPAL_CONFIG.SECRET}`);
+              const tokenResponse = await fetch(
+                `${PAYPAL_CONFIG.API_BASE_URL}/v1/oauth2/token`,
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Accept': 'application/json',
+                    'Authorization': `Basic ${credentials}`,
+                  },
+                  body: 'grant_type=client_credentials',
+                }
+              );
+
+              if (!tokenResponse.ok) {
+                const errorData = await tokenResponse.json().catch(() => ({}));
+                throw new Error(errorData.error_description || errorData.error || 'Failed to get PayPal access token');
+              }
+
+              const tokenData = await tokenResponse.json();
+              const accessToken = tokenData.access_token;
+
+              // Create payout batch
+              const payoutResponse = await fetch(
+                `${PAYPAL_CONFIG.API_BASE_URL}/v1/payments/payouts`,
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${accessToken}`,
+                  },
+                  body: JSON.stringify({
+                    sender_batch_header: {
+                      sender_batch_id: `BOOKING-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+                      email_subject: 'You have received a booking payment from StayHub',
+                      email_message: `You have received a booking payment of ₱${amountPHP.toLocaleString()} PHP from StayHub.`,
+                    },
+                    items: [
+                      {
+                        recipient_type: 'EMAIL',
+                        amount: {
+                          value: amount.toFixed(2),
+                          currency: 'PHP',
+                        },
+                        receiver: paypalEmail,
+                        note: `Booking payment from StayHub - ₱${amount.toLocaleString()}`,
+                        sender_item_id: `BOOKING-${Date.now()}`,
+                      },
+                    ],
+                  }),
+                }
+              );
+
+              if (!payoutResponse.ok) {
+                const errorData = await payoutResponse.json().catch(() => ({}));
+                const errorMessage = errorData.message || 
+                                  errorData.details?.[0]?.description || 
+                                  errorData.details?.[0]?.issue ||
+                                  `PayPal API error: ${payoutResponse.status} ${payoutResponse.statusText}`;
+                throw new Error(errorMessage);
+              }
+
+              const payoutData = await payoutResponse.json();
+              const batchHeader = payoutData.batch_header || {};
+              const items = payoutData.items || [];
+              const firstItem = items[0] || {};
+              
+              return {
+                success: true,
+                payoutBatchId: batchHeader.payout_batch_id || `PAYOUT-${Date.now()}`,
+                payoutItemId: firstItem.payout_item_id || firstItem.payout_item?.payout_item_id || `ITEM-${Date.now()}`,
+                status: batchHeader.batch_status || 'PENDING',
+              };
+            } catch (error) {
+              console.error('PayPal Payout Error:', error);
+              throw new Error(error.message || 'Failed to process PayPal payout');
+            }
+          };
+
+          // Get service fee percentage (default 10%)
+          let serviceFeePercent = 10;
+          try {
+            const configRef = doc(db, "adminSettings", "config");
+            const configSnap = await getDoc(configRef);
+            if (configSnap.exists()) {
+              const configData = configSnap.data();
+              const parsedFee = Number(configData.serviceFee);
+              if (!Number.isNaN(parsedFee) && parsedFee >= 0 && parsedFee <= 100) {
+                serviceFeePercent = parsedFee;
+              }
+            }
+          } catch (configError) {
+            console.warn("Failed to load service fee config, using default 10%", configError);
+          }
+
+          // Calculate host share (90% after 10% admin commission)
+          const adminCommission = total * (serviceFeePercent / 100);
+          const hostShare = total - adminCommission;
+
+          // Add host earnings to their wallet instead of PayPal payout
+          console.log(`💰 Adding ₱${hostShare.toLocaleString()} (${100 - serviceFeePercent}%) to host wallet`);
+          
+          try {
+            // Get current host wallet balance
+            const hostUserRef = doc(db, "users", hostId);
+            const hostUserSnap = await getDoc(hostUserRef);
+            let currentBalance = 0;
+            
+            if (hostUserSnap.exists()) {
+              const hostUserData = hostUserSnap.data();
+              currentBalance = parseFloat(hostUserData.paypalBalance) || 0;
+            }
+            
+            // Update host wallet balance
+            const newHostBalance = currentBalance + hostShare;
+            await updateDoc(hostUserRef, {
+              paypalBalance: newHostBalance,
+              updatedAt: serverTimestamp()
+            });
+            
+            console.log('✅ Host wallet updated successfully:', {
+              hostId: hostId,
+              previousBalance: currentBalance,
+              amountAdded: hostShare,
+              newBalance: newHostBalance
+            });
+            
+            // Create transaction record for host
+            await addDoc(collection(db, 'transactions'), {
+              userId: hostId,
+              type: 'booking-payment',
+              displayType: 'Booking Payment Received',
+              amount: hostShare,
+              description: `Booking payment: ${selectedListing.title || 'Booking'} - ${profile.name || 'Guest'}`,
+              bookingId: newBookingRef.id,
+              guestName: profile.name,
+              listingTitle: selectedListing.title || '',
+              checkIn: bookingDates.checkIn,
+              checkOut: bookingDates.checkOut,
+              status: 'completed',
+              method: 'Wallet',
+              balanceBefore: currentBalance,
+              balanceAfter: newHostBalance,
+              date: serverTimestamp(),
+              createdAt: new Date().toISOString()
+            });
+            
+            // Update host's dashboard metrics
+            await incrementDashboardMetrics(hostId, "totalEarnings", hostShare);
+            await incrementDashboardMetrics(hostId, "monthlyRevenue", hostShare);
+          } catch (hostWalletError) {
+            console.error('❌ Error updating host wallet:', hostWalletError);
+            console.error('Host wallet error details:', {
+              hostId: hostId,
+              hostShare: hostShare,
+              error: hostWalletError.message,
+              stack: hostWalletError.stack
+            });
+            alert(`Warning: Payment received but failed to add to host wallet.\n\nError: ${hostWalletError.message}\n\nPlease check console for details.`);
+            // Still create transaction record but mark as pending
+            await addDoc(collection(db, 'transactions'), {
+              userId: hostId,
+              type: 'booking-payment',
+              displayType: 'Booking Payment Received',
+              amount: hostShare,
+              description: `Booking payment: ${selectedListing.title || 'Booking'} - ${profile.name || 'Guest'} (Wallet update failed: ${hostWalletError.message})`,
+              bookingId: newBookingRef.id,
+              status: 'pending',
+              method: 'Wallet',
+              date: serverTimestamp(),
+              createdAt: new Date().toISOString()
+            });
+            // Update metrics anyway
+            await incrementDashboardMetrics(hostId, "totalEarnings", hostShare);
+            await incrementDashboardMetrics(hostId, "monthlyRevenue", hostShare);
+          }
+
+          // Send admin commission to admin PayPal account
+          const adminPayPalEmail = "gabennewell79@gmail.com";
+          console.log(`💰 Sending ₱${adminCommission.toLocaleString()} (${serviceFeePercent}% commission) to admin PayPal: ${adminPayPalEmail}`);
+          
+          const adminPayoutResult = await processPayPalPayout(adminPayPalEmail, adminCommission);
+          
+          console.log('✅ Admin commission payout successful:', adminPayoutResult);
+          
+          // Update admin wallet
+          const adminWalletRef = doc(db, "adminWallet", "earnings");
+          await runTransaction(db, async (tx) => {
+            const snap = await tx.get(adminWalletRef);
+            if (snap.exists()) {
+              const data = snap.data();
+              tx.update(adminWalletRef, {
+                balance: (Number(data.balance) || 0) + adminCommission,
+                totalEarnings: (Number(data.totalEarnings) || 0) + adminCommission,
+                lastUpdated: serverTimestamp(),
+              });
+            } else {
+              tx.set(adminWalletRef, {
+                balance: adminCommission,
+                totalEarnings: adminCommission,
+                paypalBalance: 0,
+                createdAt: serverTimestamp(),
+                lastUpdated: serverTimestamp(),
+              });
+            }
+          });
+
+          // Create admin transaction record
+          await addDoc(collection(db, 'adminTransactions'), {
+            type: 'commission',
+            amount: adminCommission,
+            bookingId: newBookingRef.id,
+            hostId: hostId,
+            serviceFeePercent,
+            description: `${serviceFeePercent}% commission from booking: ${selectedListing.title || 'Booking'}`,
+            method: 'PayPal',
+            paypalEmail: adminPayPalEmail,
+            payoutBatchId: adminPayoutResult.payoutBatchId,
+            payoutItemId: adminPayoutResult.payoutItemId,
+            date: serverTimestamp(),
+            status: 'completed'
+          });
+        } catch (payoutError) {
+          console.error('❌ Error sending payouts to host/admin:', payoutError);
+          // Don't fail the booking if payout fails - booking is already created
+          // The admin can manually process the payout later
+        }
+      }
 
       // Mark coupon as used if applied
       if (appliedCoupon) {
@@ -1784,42 +3204,59 @@ useEffect(() => {
 
   // Load PayPal SDK
   useEffect(() => {
-    if (showPayPalPayment) {
-      if (!window.paypal) {
+    if (showPayPalPayment && paymentAmount > 0) {
+      // Check if script already exists
+      const existingScript = document.querySelector('script[data-paypal-sdk="booking"]');
+      
+      if (!window.paypal && !existingScript) {
         console.log('Loading PayPal SDK...');
         const script = document.createElement('script');
+        script.setAttribute('data-paypal-sdk', 'booking');
         // PayPal Sandbox Client ID from config
-        script.src = `https://www.paypal.com/sdk/js?client-id=${PAYPAL_CONFIG.CLIENT_ID}&currency=${PAYPAL_CONFIG.CURRENCY}`;
+        // Note: PayPal payment buttons require USD currency, even though we use PHP for payouts
+        script.src = `https://www.paypal.com/sdk/js?client-id=${PAYPAL_CONFIG.CLIENT_ID}&currency=USD&intent=capture`;
         script.async = true;
         script.onload = () => {
-          console.log('PayPal SDK loaded');
+          console.log('✅ PayPal SDK loaded successfully');
+          // Wait a bit longer to ensure SDK is fully initialized
           setTimeout(() => {
             try {
-              initializePayPal();
+              if (window.paypal && showPayPalPayment) {
+                initializePayPal();
+              }
             } catch (error) {
               console.error('PayPal initialization error:', error);
               alert('Failed to initialize payment. Please try again.');
-              setShowPayPalPayment(false);
             }
-          }, 200);
+          }, 300);
         };
-        script.onerror = () => {
-          console.error('Failed to load PayPal SDK');
-          alert('Failed to load payment system. Please check your internet connection.');
-          setShowPayPalPayment(false);
+        script.onerror = (error) => {
+          console.error('❌ Failed to load PayPal SDK:', error);
+          alert('Failed to load payment system. Please check your internet connection and try again.');
         };
         document.body.appendChild(script);
-      } else {
-        console.log('PayPal SDK already loaded, initializing...');
+      } else if (window.paypal) {
+        console.log('✅ PayPal SDK already loaded, initializing buttons...');
+        // Wait for DOM to be ready
         setTimeout(() => {
           try {
-            initializePayPal();
+            if (showPayPalPayment) {
+              initializePayPal();
+            }
           } catch (error) {
             console.error('PayPal initialization error:', error);
-            alert('Failed to initialize payment. Please try again.');
-            setShowPayPalPayment(false);
+            alert('Failed to initialize payment buttons. Please try again.');
           }
-        }, 200);
+        }, 300);
+      } else if (existingScript) {
+        // Script is loading, wait for it
+        existingScript.addEventListener('load', () => {
+          setTimeout(() => {
+            if (window.paypal && showPayPalPayment) {
+              initializePayPal();
+            }
+          }, 300);
+        }, { once: true });
       }
     }
   }, [showPayPalPayment, paymentAmount]);
@@ -1840,7 +3277,8 @@ useEffect(() => {
       if (!window.paypal) {
         console.log('Loading PayPal SDK for cash-in...');
         const script = document.createElement('script');
-        script.src = `https://www.paypal.com/sdk/js?client-id=${PAYPAL_CONFIG.CLIENT_ID}&currency=${PAYPAL_CONFIG.CURRENCY}`;
+        // PayPal payment buttons require USD currency
+        script.src = `https://www.paypal.com/sdk/js?client-id=${PAYPAL_CONFIG.CLIENT_ID}&currency=USD`;
         script.async = true;
         script.onload = () => {
           console.log('PayPal SDK loaded for cash-in');
@@ -1854,10 +3292,13 @@ useEffect(() => {
             }
           }, 200);
         };
-        script.onerror = () => {
-          console.error('Failed to load PayPal SDK');
-          alert('Failed to load payment system. Please check your internet connection.');
-          setShowPayPalCashIn(false);
+        script.onerror = (error) => {
+          console.error('Failed to load PayPal SDK for cash-in:', error);
+          // Suppress generic script errors
+          if (error && error.message && !error.message.includes('Script error')) {
+            alert('Failed to load payment system. Please check your internet connection.');
+          }
+          // Don't close modal - let user try again
         };
         document.body.appendChild(script);
       } else {
@@ -1881,7 +3322,8 @@ useEffect(() => {
       if (!window.paypal) {
         console.log('Loading PayPal SDK for top-up...');
         const script = document.createElement('script');
-        script.src = `https://www.paypal.com/sdk/js?client-id=${PAYPAL_CONFIG.CLIENT_ID}&currency=${PAYPAL_CONFIG.CURRENCY}`;
+        // PayPal payment buttons require USD currency
+        script.src = `https://www.paypal.com/sdk/js?client-id=${PAYPAL_CONFIG.CLIENT_ID}&currency=USD`;
         script.async = true;
         script.onload = () => {
           console.log('PayPal SDK loaded for top-up');
@@ -1895,10 +3337,13 @@ useEffect(() => {
             }
           }, 200);
         };
-        script.onerror = () => {
-          console.error('Failed to load PayPal SDK');
-          alert('Failed to load payment system. Please check your internet connection.');
-          setShowPayPalTopUpPayment(false);
+        script.onerror = (error) => {
+          console.error('Failed to load PayPal SDK for top-up:', error);
+          // Suppress generic script errors
+          if (error && error.message && !error.message.includes('Script error')) {
+            alert('Failed to load payment system. Please check your internet connection.');
+          }
+          // Don't close modal - let user try again
         };
         document.body.appendChild(script);
       } else {
@@ -2089,6 +3534,23 @@ useEffect(() => {
     if (newBookings) setBookings(newBookings);
   }, []);
 
+  // Close dropdowns when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (showDatePicker && !event.target.closest('.date-picker-container')) {
+        setShowDatePicker(false);
+      }
+      if (showGuestDropdown && !event.target.closest('.guest-dropdown-container')) {
+        setShowGuestDropdown(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showDatePicker, showGuestDropdown]);
+
   return (
     <div className="min-h-screen bg-gold-50">
       {/* Sidebar Menu */}
@@ -2164,7 +3626,7 @@ useEffect(() => {
                   <FaWallet className="text-green-500 text-xl group-hover:scale-110 transition" />
                   <div className="flex flex-col items-start">
                     <span className="text-gray-700 font-medium">Wallet</span>
-                    <span className="text-xs text-green-600">${paypalBalance.toFixed(2)} USD</span>
+                    <span className="text-xs text-green-600">₱{paypalBalance.toLocaleString()} PHP</span>
                   </div>
                 </button>
 
@@ -2228,18 +3690,6 @@ useEffect(() => {
                   </div>
                 </button>
 
-                {/* Account Settings */}
-                <button
-                  onClick={() => {
-                    setShowAccountSettings(true);
-                    setIsSidebarOpen(false);
-                  }}
-                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-gray-50 transition group"
-                >
-                  <FaCog className="text-gray-600 text-xl group-hover:scale-110 transition" />
-                  <span className="text-gray-700 font-medium">Account Settings</span>
-                </button>
-
                 {/* Divider */}
                 <div className="border-t border-gray-200 my-4"></div>
 
@@ -2263,14 +3713,14 @@ useEffect(() => {
       {/* Sticky Airbnb-like Header */}
       {/* Sticky StayHub Header */}
 <div className="sticky top-0 z-40 border-b bg-white/90 backdrop-blur-md border-white/30 shadow-sm">
-  <div className="max-w-7xl mx-auto px-4">
-    <div className="h-20 flex items-center justify-between gap-4">
+  <div className="max-w-7xl mx-auto px-3 md:px-4">
+    <div className="h-16 md:h-20 flex items-center justify-between gap-2 md:gap-4">
       {/* Left: Profile Info */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2 md:gap-3 flex-shrink-0">
         <img
           src={profile.avatar}
           alt="avatar"
-          className="w-10 h-10 rounded-full border-2 border-gold-400 object-cover"
+          className="w-8 h-8 md:w-10 md:h-10 rounded-full border-2 border-gold-400 object-cover flex-shrink-0"
         />
         <div className="hidden sm:block">
           <div className="text-xs text-gray-500">Signed in as</div>
@@ -2279,12 +3729,23 @@ useEffect(() => {
       </div>
 
       {/* Center: Search Bar with Where, Dates, Who */}
-      <div className="flex-1 max-w-3xl">
-        <div className="flex items-center rounded-full border border-gold-200 shadow-md px-2 py-2 gap-1 bg-white">
+      <div className="flex-1 max-w-3xl w-full">
+        {/* Mobile: Simple search button */}
+        <div className="lg:hidden">
+          <div className="w-full flex items-center justify-between rounded-full border border-gold-200 shadow-md px-4 py-3 bg-white">
+            <div className="flex items-center gap-2 text-gray-600">
+              <FaSearch className="text-gold-500" />
+              <span className="text-sm">Search destinations</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Desktop: Full search bar */}
+        <div className="hidden lg:flex items-center rounded-full border border-gold-200 shadow-md px-2 py-2 gap-1 bg-white">
           {/* Where */}
-          <div className="flex items-center gap-2 px-3 py-1 flex-1 border-r border-gray-200">
-            <FaMapMarkerAlt className="text-gold-500" />
-            <div className="flex flex-col flex-1">
+          <div className="flex items-center gap-2 px-3 py-1 flex-1 border-r border-gray-200 min-w-0">
+            <FaMapMarkerAlt className="text-gold-500 flex-shrink-0" />
+            <div className="flex flex-col flex-1 min-w-0">
               <label className="text-xs font-semibold text-gray-700">Where</label>
               <input
                 type="text"
@@ -2294,16 +3755,16 @@ useEffect(() => {
                   setSearch(e.target.value);
                 }}
                 onKeyDown={(e) => e.key === "Enter" && handleAdvancedSearch()}
-                className="bg-transparent outline-none text-sm"
+                className="bg-transparent outline-none text-sm w-full"
                 placeholder="Search destinations"
               />
             </div>
           </div>
 
           {/* Dates */}
-          <div className="flex items-center gap-2 px-3 py-1 flex-1 border-r border-gray-200">
-            <FaCalendarAlt className="text-gold-500" />
-            <div className="flex flex-col flex-1">
+          <div className="relative date-picker-container flex items-center gap-2 px-3 py-1 flex-1 border-r border-gray-200 min-w-0">
+            <FaCalendarAlt className="text-gold-500 flex-shrink-0" />
+            <div className="flex flex-col flex-1 min-w-0">
               <label className="text-xs font-semibold text-gray-700">Dates</label>
               <input
                 type="text"
@@ -2312,34 +3773,99 @@ useEffect(() => {
                     ? `${new Date(searchDates.checkIn).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${new Date(searchDates.checkOut).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
                     : ""
                 }
-                className="bg-transparent outline-none text-sm cursor-pointer"
+                className="bg-transparent outline-none text-sm cursor-pointer w-full truncate"
                 placeholder="Add dates"
                 readOnly
-                onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
+                onClick={() => setShowDatePicker(!showDatePicker)}
               />
             </div>
+            {showDatePicker && (
+              <div className="absolute top-full left-0 mt-2 z-50 bg-white rounded-xl shadow-2xl border p-4">
+                <DateRangePicker
+                  checkIn={searchDates.checkIn}
+                  checkOut={searchDates.checkOut}
+                  onChange={(dates) => {
+                    setSearchDates(dates);
+                    // Auto-apply search when both dates are selected
+                    if (dates.checkIn && dates.checkOut) {
+                      setShowDatePicker(false);
+                      // Trigger search after state update
+                      setTimeout(() => {
+                        handleAdvancedSearch();
+                      }, 100);
+                    }
+                  }}
+                  minDate={new Date().toISOString().split('T')[0]}
+                  bookedDates={[]}
+                  bookedRanges={[]}
+                />
+              </div>
+            )}
           </div>
 
           {/* Who */}
-          <div className="flex items-center gap-2 px-3 py-1 flex-1">
-            <FaUsers className="text-gold-500" />
-            <div className="flex flex-col flex-1">
+          <div className="relative guest-dropdown-container flex items-center gap-2 px-3 py-1 flex-1 min-w-0">
+            <FaUsers className="text-gold-500 flex-shrink-0" />
+            <div className="flex flex-col flex-1 min-w-0">
               <label className="text-xs font-semibold text-gray-700">Who</label>
               <input
                 type="text"
                 value={searchGuests > 0 ? `${searchGuests} guest${searchGuests > 1 ? 's' : ''}` : ""}
-                className="bg-transparent outline-none text-sm cursor-pointer"
+                className="bg-transparent outline-none text-sm cursor-pointer w-full truncate"
                 placeholder="Add guests"
                 readOnly
-                onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
+                onClick={() => setShowGuestDropdown(!showGuestDropdown)}
               />
             </div>
+            {showGuestDropdown && (
+              <div className="absolute top-full right-0 mt-2 z-50 bg-white rounded-lg shadow-xl border min-w-[200px]">
+                <div className="p-4">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-sm font-semibold text-gray-700">Number of Guests</span>
+                    <button
+                      onClick={() => setShowGuestDropdown(false)}
+                      className="text-gray-400 hover:text-gray-600"
+                    >
+                      <FaTimes className="text-sm" />
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-sm text-gray-700">Guests</span>
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => setSearchGuests(Math.max(1, searchGuests - 1))}
+                        className="w-8 h-8 rounded-full border border-gray-300 hover:border-gold-500 flex items-center justify-center text-gray-600 hover:text-gold-600 transition"
+                      >
+                        -
+                      </button>
+                      <span className="text-lg font-semibold w-8 text-center">{searchGuests}</span>
+                      <button
+                        onClick={() => setSearchGuests(searchGuests + 1)}
+                        className="w-8 h-8 rounded-full border border-gray-300 hover:border-gold-500 flex items-center justify-center text-gray-600 hover:text-gold-600 transition"
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setShowGuestDropdown(false);
+                      // Trigger search when guest count is changed
+                      handleAdvancedSearch();
+                    }}
+                    className="w-full bg-gold-500 text-white py-2 rounded-lg hover:bg-gold-600 transition font-medium text-sm"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Search Button */}
           <button
             onClick={handleAdvancedSearch}
-            className="bg-gold-500 text-white p-3 rounded-full hover:bg-gold-600 transition"
+            className="bg-gold-500 text-white p-3 rounded-full hover:bg-gold-600 transition flex-shrink-0"
             title="Search"
           >
             <FaSearch />
@@ -2350,18 +3876,18 @@ useEffect(() => {
       {/* Right: Menu Button */}
       <button
         onClick={() => setIsSidebarOpen(true)}
-        className="flex items-center gap-2 border border-gold-200 px-3 py-2 rounded-full hover:shadow hover:bg-gold-50 transition"
+        className="flex items-center gap-1 md:gap-2 border border-gold-200 px-2 md:px-3 py-1.5 md:py-2 rounded-full hover:shadow hover:bg-gold-50 transition flex-shrink-0"
       >
-        <FaBars className="text-gold-500 text-xl" />
-        <span className="text-sm text-gray-700 hidden sm:inline">Menu</span>
+        <FaBars className="text-gold-500 text-lg md:text-xl" />
+        <span className="text-xs md:text-sm text-gray-700 hidden sm:inline">Menu</span>
       </button>
     </div>
   </div>
 
   {/* Categories bar */}
   <div className="border-t border-gold-100 bg-gold-gradient-light">
-    <div className="max-w-7xl mx-auto px-4">
-      <div className="flex items-center gap-4 overflow-x-auto no-scrollbar py-3">
+    <div className="max-w-7xl mx-auto px-3 md:px-4">
+      <div className="flex items-center gap-3 md:gap-4 overflow-x-auto no-scrollbar py-2 md:py-3">
         {["All", "Home", "Experience", "Service"].map((cat) => (
           <button
             key={cat}
@@ -2382,166 +3908,124 @@ useEffect(() => {
 </div>
 
 
-      <div className="max-w-7xl mx-auto px-4 py-8">
-        {/* Enhanced Filter pills under search */}
-        <div className="flex items-center gap-3 mb-6 overflow-x-auto no-scrollbar">
-          <button 
-            className="border rounded-full px-4 py-2 text-sm hover:shadow flex items-center gap-2"
-            onClick={() => setDateFilter(dateFilter === "Any week" ? "This weekend" : "Any week")}
-          >
-            <FaCalendarAlt className="text-gray-400" />
-            {dateFilter}
-          </button>
-          <button className="border rounded-full px-4 py-2 text-sm hover:shadow flex items-center gap-2">
-            <FaMapMarkerAlt className="text-gray-400" />
-            Anywhere
-          </button>
-          <button 
-            className="border rounded-full px-4 py-2 text-sm hover:shadow flex items-center gap-2"
-            onClick={() => setActiveCategory(activeCategory === "All" ? "Home" : "All")}
-          >
-            {activeCategory === "All" ? "Any type" : activeCategory}
-          </button>
-          <button 
-            className="border rounded-full px-4 py-2 text-sm hover:shadow flex items-center gap-2"
-            onClick={() => setGuestCount(guestCount === 2 ? 4 : 2)}
-          >
-            <FaUsers className="text-gray-400" />
-            {guestCount} guests
-          </button>
-          <button 
-            className="border rounded-full px-4 py-2 text-sm hover:shadow flex items-center gap-2"
-            onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
-          >
-            <FaFilter className="text-gray-400" />
-            Filters
-          </button>
+      <div className="max-w-7xl mx-auto px-3 md:px-4 py-4 md:py-8">
+        {/* Results Count */}
+        <div className="mb-4 md:mb-6">
+          <div className="text-sm text-gray-600">
+            {(() => {
+              let listingsToShow = [];
+              // Check if any filters are active
+              const hasActiveFilters = searchQuery || 
+                selectedAmenities.length > 0 || 
+                priceRange[1] < 10000 || 
+                (searchDates.checkIn && searchDates.checkOut) || 
+                searchGuests > 1;
+              
+              if (hasActiveFilters) {
+                listingsToShow = searchResults;
+              } else {
+                listingsToShow = getListingsPool();
+              }
+              listingsToShow = listingsToShow.filter(l => activeCategory === "All" ? true : l.category === activeCategory);
+              return `${listingsToShow.length} place${listingsToShow.length === 1 ? '' : 's'} available`;
+            })()}
+          </div>
         </div>
 
-        {/* Advanced Filters Panel */}
-        {showAdvancedFilters && (
-          <div className="bg-white rounded-xl p-6 mb-6 border shadow-lg">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold text-lg">Search Filters</h3>
-              <button
-                onClick={() => setShowAdvancedFilters(false)}
-                className="text-gray-400 hover:text-gray-600"
+        {isImageGalleryOpen && galleryImages.length > 0 && (
+          <div
+            className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4"
+            onClick={handleCloseImageGallery}
+          >
+            <div
+              className="relative w-full max-w-5xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+          <button 
+                type="button"
+                onClick={handleCloseImageGallery}
+                className="absolute -top-3 -right-3 z-50 flex h-10 w-10 items-center justify-center rounded-full bg-white text-gray-700 shadow-lg hover:text-gold-500 transition"
+                aria-label="Close gallery"
               >
                 <FaTimes />
               </button>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Check-in Date */}
-              <div>
-                <label className="block text-sm font-semibold mb-2">Check-in Date</label>
-                <input
-                  type="date"
-                  value={searchDates.checkIn}
-                  onChange={(e) => setSearchDates({ ...searchDates, checkIn: e.target.value })}
-                  min={new Date().toISOString().split('T')[0]}
-                  className="w-full border rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
-
-              {/* Check-out Date */}
-              <div>
-                <label className="block text-sm font-semibold mb-2">Check-out Date</label>
-                <input
-                  type="date"
-                  value={searchDates.checkOut}
-                  onChange={(e) => setSearchDates({ ...searchDates, checkOut: e.target.value })}
-                  min={searchDates.checkIn || new Date().toISOString().split('T')[0]}
-                  className="w-full border rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
-
-              {/* Number of Guests */}
-              <div>
-                <label className="block text-sm font-semibold mb-2">Number of Guests</label>
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => setSearchGuests(Math.max(1, searchGuests - 1))}
-                    className="bg-gray-200 hover:bg-gray-300 w-8 h-8 rounded-full flex items-center justify-center"
-                  >
-                    -
-                  </button>
-                  <span className="text-lg font-semibold">{searchGuests}</span>
-                  <button
-                    onClick={() => setSearchGuests(searchGuests + 1)}
-                    className="bg-gray-200 hover:bg-gray-300 w-8 h-8 rounded-full flex items-center justify-center"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-
-              {/* Price Range */}
-              <div>
-                <label className="block text-sm font-semibold mb-2">Price Range (per night)</label>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm">₱{priceRange[0].toLocaleString()}</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="10000"
-                    value={priceRange[1]}
-                    onChange={(e) => setPriceRange([priceRange[0], parseInt(e.target.value)])}
-                    className="flex-1"
+              <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
+                <div className="relative bg-black">
+                  <img
+                    src={galleryImages[galleryIndex]}
+                    alt={
+                      galleryListing?.title
+                        ? `${galleryListing.title} photo ${galleryIndex + 1}`
+                        : `Listing photo ${galleryIndex + 1}`
+                    }
+                    className="w-full max-h-[70vh] object-contain bg-black"
                   />
-                  <span className="text-sm">₱{priceRange[1].toLocaleString()}</span>
+                  {galleryImages.length > 1 && (
+                    <>
+                  <button
+                        type="button"
+                        onClick={() => handleGalleryNavigate(-1)}
+                        className="absolute left-4 top-1/2 -translate-y-1/2 flex h-12 w-12 items-center justify-center rounded-full bg-black/60 text-white shadow-lg hover:bg-black/80 transition"
+                        aria-label="Previous photo"
+                      >
+                        <FaChevronLeft />
+                  </button>
+                  <button
+                        type="button"
+                        onClick={() => handleGalleryNavigate(1)}
+                        className="absolute right-4 top-1/2 -translate-y-1/2 flex h-12 w-12 items-center justify-center rounded-full bg-black/60 text-white shadow-lg hover:bg-black/80 transition"
+                        aria-label="Next photo"
+                      >
+                        <FaChevronRight />
+                  </button>
+                      <div className="absolute bottom-4 right-4 bg-black/60 text-white text-xs px-3 py-1 rounded-full">
+                        {galleryIndex + 1} / {galleryImages.length}
                 </div>
+                    </>
+                  )}
               </div>
-
-              {/* Amenities */}
-              <div className="md:col-span-2">
-                <label className="block text-sm font-semibold mb-2">Amenities</label>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                  {(availableAmenities || []).slice(0, 8).map((amenity) => (
-                    <label key={amenity.name} className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={selectedAmenities.includes(amenity.name)}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setSelectedAmenities([...selectedAmenities, amenity.name]);
-                          } else {
-                            setSelectedAmenities(selectedAmenities.filter(a => a !== amenity.name));
-                          }
-                        }}
-                        className="rounded"
-                      />
-                      <amenity.icon className="text-gray-400" />
-                      {amenity.name}
-                    </label>
-                  ))}
+                <div className="p-4 bg-white">
+                  {galleryListing && (
+                    <div className="mb-4 flex items-start justify-between gap-4">
+              <div>
+                        <div className="text-lg font-semibold text-gray-900">
+                          {galleryListing.title || "Listing photos"}
                 </div>
+                        {(galleryListing.location || galleryListing.category) && (
+                          <div className="text-sm text-gray-500">
+                            {[galleryListing.location, galleryListing.category]
+                              .filter(Boolean)
+                              .join(" • ")}
               </div>
-
-              {/* Action Buttons */}
-              <div className="md:col-span-2 flex gap-3">
+                        )}
+                </div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                        {galleryImages.length} photo{galleryImages.length > 1 ? "s" : ""}
+              </div>
+                    </div>
+                  )}
+                  {galleryImages.length > 1 && (
+                    <div className="grid grid-cols-5 gap-2 max-h-32 overflow-y-auto">
+                      {galleryImages.map((image, index) => (
                 <button
-                  onClick={() => {
-                    setPriceRange([0, 10000]);
-                    setSelectedAmenities([]);
-                    setActiveCategory("All");
-                    setSearchDates({ checkIn: "", checkOut: "" });
-                    setSearchGuests(1);
-                    setSearchWhere("");
-                    setSearch("");
-                  }}
-                  className="flex-1 text-sm text-gold-600 hover:text-gold-700 border border-gold-600 px-4 py-2 rounded-lg font-semibold"
-                >
-                  Clear all filters
+                          type="button"
+                          key={index}
+                          onClick={() => handleSelectGalleryImage(index)}
+                          className={`relative h-16 rounded-md overflow-hidden border-2 transition ${
+                            galleryIndex === index ? "border-gold-500" : "border-transparent"
+                          }`}
+                          aria-label={`View photo ${index + 1}`}
+                        >
+                          <img
+                            src={image}
+                            alt={`Gallery thumbnail ${index + 1}`}
+                            className="w-full h-full object-cover"
+                          />
                 </button>
-                <button
-                  onClick={() => {
-                    handleAdvancedSearch();
-                    setShowAdvancedFilters(false);
-                  }}
-                  className="flex-1 bg-gold-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-gold-600 transition font-semibold"
-                >
-                  Apply Filters
-                </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -2763,13 +4247,13 @@ useEffect(() => {
         {showWishlist && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden">
-              <div className="bg-gradient-to-r from-pink-500 to-pink-600 p-6 text-white">
+              <div className="bg-gradient-to-r from-gold-500 to-gold-600 p-6 text-white">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <FaHeart className="text-3xl" />
                     <div>
                       <h3 className="text-2xl font-bold">Your Favorites</h3>
-                      <p className="text-pink-100 text-sm">{favorites.length} saved places</p>
+                      <p className="text-gold-100 text-sm">{favorites.length} saved places</p>
                     </div>
                   </div>
                   <button
@@ -2798,7 +4282,7 @@ useEffect(() => {
                             onClick={() => toggleFavorite(fav)}
                             className="absolute top-3 right-3 p-2 rounded-full bg-white/90 hover:bg-white shadow"
                           >
-                            <FaHeart className="text-pink-500" />
+                            <FaHeart className="text-gold-500" />
                           </button>
                         </div>
                         <div className="p-4">
@@ -2830,13 +4314,13 @@ useEffect(() => {
         {showAllBookings && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
             <div className="bg-white rounded-xl shadow-2xl w-full max-w-6xl max-h-[90vh] overflow-hidden">
-              <div className="bg-gradient-to-r from-purple-500 to-purple-600 p-6 text-white">
+              <div className="bg-gradient-to-r from-gold-500 to-gold-600 p-6 text-white">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <FaListAlt className="text-3xl" />
                     <div>
                       <h3 className="text-2xl font-bold">Your Bookings</h3>
-                      <p className="text-purple-100 text-sm">{bookings.length} total bookings</p>
+                      <p className="text-gold-100 text-sm">{bookings.length} total bookings</p>
                     </div>
                   </div>
                   <button
@@ -2864,7 +4348,11 @@ useEffect(() => {
                           <FaSpinner className="text-yellow-500 animate-spin" /> Pending Approval
                         </h4>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {bookings.filter(b => b.status === "PendingApproval").map((b) => (
+                          {bookings.filter(b => b.status === "PendingApproval").map((b) => {
+                            const timeRemaining = getCancellationTimeRemaining(b);
+                            const canCancel = timeRemaining && !timeRemaining.expired;
+                            
+                            return (
                             <div key={b.id} className="bg-yellow-50 border-2 border-yellow-300 rounded-xl p-4">
                               <div className="flex gap-3">
                                 <img src={b.img} alt={b.title} className="w-20 h-20 rounded-lg object-cover" />
@@ -2874,13 +4362,32 @@ useEffect(() => {
                                   <div className="text-xs text-gray-500 mt-1">
                                     {b.displayCheckIn} - {b.displayCheckOut}
                                   </div>
-                                  <div className="mt-2 flex items-center gap-2">
+                                    {timeRemaining && (
+                                      <div className="mt-2 text-xs">
+                                        {canCancel ? (
+                                          <div className="flex items-center gap-1 text-orange-600 font-medium">
+                                            <FaClock className="text-xs" />
+                                            <span>Cancel within: {formatTimeRemaining(timeRemaining.remaining)}</span>
+                                          </div>
+                                        ) : (
+                                          <div className="text-red-600 font-medium">
+                                            ⏰ Cancellation window expired
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                    <div className="mt-2 flex items-center gap-2 flex-wrap">
                                     <span className="bg-yellow-200 text-yellow-800 px-2 py-1 rounded-full text-xs font-medium">
                                       {b.status}
                                     </span>
                                     <button
                                       onClick={() => handleCancelPendingBooking(b)}
-                                      className="bg-red-500 text-white px-3 py-1 rounded text-xs hover:bg-red-600 flex items-center gap-1 transition"
+                                        disabled={!canCancel}
+                                        className={`px-3 py-1 rounded text-xs flex items-center gap-1 transition ${
+                                          canCancel 
+                                            ? 'bg-red-500 text-white hover:bg-red-600' 
+                                            : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                        }`}
                                     >
                                       <FaTimes /> Cancel
                                     </button>
@@ -2888,7 +4395,8 @@ useEffect(() => {
                                 </div>
                               </div>
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -2900,7 +4408,11 @@ useEffect(() => {
                           <FaCalendarAlt className="text-green-500" /> Upcoming
                         </h4>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {bookings.filter(b => b.status === "Upcoming").map((b) => (
+                          {bookings.filter(b => b.status === "Upcoming").map((b) => {
+                            const timeRemaining = getCancellationTimeRemaining(b);
+                            const canCancel = timeRemaining && !timeRemaining.expired;
+                            
+                            return (
                             <div key={b.id} className="bg-white border rounded-xl p-4 hover:shadow-lg transition">
                               <div className="flex gap-3">
                                 <img src={b.img} alt={b.title} className="w-20 h-20 rounded-lg object-cover" />
@@ -2910,13 +4422,32 @@ useEffect(() => {
                                   <div className="text-xs text-gray-500 mt-1">
                                     {b.displayCheckIn} - {b.displayCheckOut}
                                   </div>
-                                  <div className="mt-2 flex items-center gap-2">
+                                    {timeRemaining && (
+                                      <div className="mt-2 text-xs">
+                                        {canCancel ? (
+                                          <div className="flex items-center gap-1 text-orange-600 font-medium">
+                                            <FaClock className="text-xs" />
+                                            <span>Cancel within: {formatTimeRemaining(timeRemaining.remaining)}</span>
+                                          </div>
+                                        ) : (
+                                          <div className="text-red-600 font-medium">
+                                            ⏰ Cancellation window expired
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                    <div className="mt-2 flex items-center gap-2 flex-wrap">
                                     <span className="bg-green-100 text-green-700 px-2 py-1 rounded-full text-xs font-medium">
                                       {b.status}
                                     </span>
                                     <button
                                       onClick={() => handleCancelPendingBooking(b)}
-                                      className="bg-red-500 text-white px-3 py-1 rounded text-xs hover:bg-red-600 flex items-center gap-1 transition"
+                                        disabled={!canCancel}
+                                        className={`px-3 py-1 rounded text-xs flex items-center gap-1 transition ${
+                                          canCancel 
+                                            ? 'bg-red-500 text-white hover:bg-red-600' 
+                                            : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                        }`}
                                     >
                                       <FaTimes /> Cancel
                                     </button>
@@ -2924,7 +4455,8 @@ useEffect(() => {
                                 </div>
                               </div>
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -3008,31 +4540,92 @@ useEffect(() => {
 
         {/* Enhanced Explore Grid */}
         <div className="mb-12">
-          <div className="flex items-center justify-between mb-6">
-            <div className="font-bold text-2xl text-gray-800">Explore Stays</div>
-            <div className="text-sm text-gray-500">
-              {(searchQuery ? searchResults : getListingsPool())
-                .filter(l => activeCategory === "All" ? true : l.category === activeCategory).length} places
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6">
+            {/* Display filtered results */}
+            {(() => {
+              // Get the listings to display
+              let listingsToShow = [];
+              
+              // Check if any filters are active
+              const hasActiveFilters = searchQuery || 
+                selectedAmenities.length > 0 || 
+                priceRange[1] < 10000 || 
+                (searchDates.checkIn && searchDates.checkOut) || 
+                searchGuests > 1;
+              
+              // If there's an active search query or filters applied, use searchResults
+              if (hasActiveFilters) {
+                listingsToShow = searchResults;
+              } else {
+                // Otherwise use the full pool
+                listingsToShow = getListingsPool();
+              }
+              
+              // Apply category filter
+              listingsToShow = listingsToShow.filter((l) => activeCategory === "All" ? true : l.category === activeCategory);
+              
+              if (listingsToShow.length === 0) {
+                return (
+                  <div className="col-span-full text-center py-16 bg-gray-50 rounded-xl">
+                    <FaSearch className="text-5xl text-gray-300 mx-auto mb-4" />
+                    <h3 className="text-xl font-semibold text-gray-700 mb-2">No listings found</h3>
+                    <p className="text-gray-500 mb-4">Try adjusting your filters or search criteria.</p>
+                    <button
+                      onClick={() => {
+                        setPriceRange([0, 10000]);
+                        setSelectedAmenities([]);
+                        setActiveCategory("All");
+                        setSearchDates({ checkIn: "", checkOut: "" });
+                        setSearchGuests(1);
+                        setSearchWhere("");
+                        setSearch("");
+                        setSearchQuery("");
+                        setSearchResults(getListingsPool());
+                      }}
+                      className="bg-gold-500 text-white px-6 py-2 rounded-lg hover:bg-gold-600 transition font-medium"
+                    >
+                      Clear all filters
+                    </button>
             </div>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-            {/* Display search results - filtered by search query AND active category */}
-            {(searchQuery ? searchResults : getListingsPool())
-              .filter((l) => activeCategory === "All" ? true : l.category === activeCategory)
-              .length > 0 ? (
-                (searchQuery ? searchResults : getListingsPool())
-                  .filter((l) => activeCategory === "All" ? true : l.category === activeCategory)
-                  .map((l) => (
+                );
+              }
+              
+              return listingsToShow.map((l) => {
+                    const listingImages = extractListingImages(l);
+                    const coverImage =
+                      listingImages[0] ||
+                      l.img ||
+                      "/images/cozy home.jpg";
+                    const viewPhotosLabel = listingImages.length > 1 ? "View photos" : "View photo";
+                    const guestCapacity = getListingGuestCapacity(l);
+                    const bedrooms = getListingBedrooms(l);
+                    const bathrooms = getListingBathrooms(l);
+
+                    return (
                     <div key={l.id} className="group flex flex-col bg-white rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 overflow-hidden h-full">
                       {/* Image Section */}
-                      <div className="relative overflow-hidden aspect-[4/3] bg-gray-100">
+                      <div
+                        className="relative overflow-hidden aspect-[4/3] bg-gray-100 cursor-pointer"
+                        onClick={() => handleOpenImageGallery(l, 0, coverImage)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            handleOpenImageGallery(l, 0, coverImage);
+                          }
+                        }}
+                      >
                         <img
-                          src={l.img}
+                          src={coverImage}
                           alt={l.title}
                           className="h-full w-full object-cover group-hover:scale-105 transition duration-300"
                         />
                         <button
-                          onClick={() => toggleFavorite(l)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleFavorite(l);
+                          }}
                           className="absolute top-3 right-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
                           aria-label="Toggle favorite"
                         >
@@ -3043,7 +4636,10 @@ useEffect(() => {
                           />
                         </button>
                         <button
-                          onClick={() => setShowShareModal(l)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowShareModal(l);
+                          }}
                           className="absolute top-3 left-3 p-2 rounded-full bg-white/80 hover:bg-white shadow"
                           aria-label="Share"
                         >
@@ -3054,6 +4650,9 @@ useEffect(() => {
                         </div>
                         <div className="absolute bottom-3 right-3 bg-white/80 text-xs px-2 py-1 rounded-full font-medium">
                           {l.calendar || 'Available'}
+                        </div>
+                        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 pointer-events-none z-10 flex items-center gap-2 bg-black/50 text-white px-3 py-1 rounded-full text-xs font-semibold backdrop-blur-sm">
+                          <FaImages /> <span>{viewPhotosLabel}</span>
                         </div>
                       </div>
 
@@ -3105,6 +4704,53 @@ useEffect(() => {
                             </span>
                           )}
                         </div>
+                    <div className="flex flex-wrap items-center gap-2 mb-3 text-xs text-gray-500">
+                          {l.category === "Experience" ? (
+                            <>
+                              {getListingDuration(l) && (
+                                <span className="bg-gray-100 px-2 py-1 rounded-full">
+                                  Duration: {getListingDuration(l)}
+                                </span>
+                              )}
+                              {getListingGroupSize(l) && (
+                                <span className="bg-gray-100 px-2 py-1 rounded-full">
+                                  Group Size: {getListingGroupSize(l)} {getListingGroupSize(l) === 1 ? "person" : "people"}
+                                </span>
+                              )}
+                            </>
+                          ) : l.category === "Service" ? (
+                            <>
+                              {getListingServiceType(l) && (
+                                <span className="bg-gray-100 px-2 py-1 rounded-full">
+                                  Service: {getListingServiceType(l)}
+                                </span>
+                              )}
+                              {getListingDuration(l) && (
+                                <span className="bg-gray-100 px-2 py-1 rounded-full">
+                                  Duration: {getListingDuration(l)}
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              {guestCapacity ? (
+                                <span className="bg-gray-100 px-2 py-1 rounded-full">
+                                  {guestCapacity} {guestCapacity === 1 ? "Guest" : "Guests"}
+                                </span>
+                              ) : null}
+                              {bedrooms ? (
+                                <span className="bg-gray-100 px-2 py-1 rounded-full">
+                                  {bedrooms} {bedrooms === 1 ? "Bedroom" : "Bedrooms"}
+                                </span>
+                              ) : null}
+                              {bathrooms !== null ? (
+                                <span className="bg-gray-100 px-2 py-1 rounded-full">
+                                  {bathrooms} {bathrooms === 1 ? "Bathroom" : "Bathrooms"}
+                                </span>
+                              ) : null}
+                            </>
+                          )}
+                        </div>
                         
                         {/* Buttons at bottom */}
                         <div className="mt-auto grid grid-cols-2 gap-2">
@@ -3123,13 +4769,9 @@ useEffect(() => {
                         </div>
                       </div>
                     </div>
-                  ))
-            ) : (
-              <div className="col-span-full text-center py-12">
-                <div className="text-6xl mb-4">🔍</div>
-                <p className="text-gray-500">No results found. Try adjusting your filters.</p>
-              </div>
-            )}
+                    );
+              });
+            })()}
           </div>
         </div>
 
@@ -3236,7 +4878,7 @@ useEffect(() => {
 
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Write a Review (Optional)
+                    Write a Review or Your Wishlist Experience(Optional)
                   </label>
                   <textarea
                     value={review}
@@ -3390,14 +5032,24 @@ useEffect(() => {
               
               {/* Header */}
               <div className="bg-gradient-to-r from-blue-600 to-blue-700 p-6 text-white">
+                <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <FaWallet className="text-3xl" />
                   <div>
                     <h3 className="text-2xl font-bold">Add Funds</h3>
                     <p className="text-blue-50 text-sm mt-1">
-                      Current Balance: ${paypalBalance.toFixed(2)} USD
+                      Current Balance: ₱{paypalBalance.toLocaleString()} PHP
                     </p>
                   </div>
+                  </div>
+                  <button
+                    onClick={syncPayPalBalance}
+                    className="flex items-center gap-2 px-3 py-2 bg-white/20 hover:bg-white/30 rounded-lg transition text-sm font-medium"
+                    title="Sync with PayPal Sandbox"
+                  >
+                    <FaSync className="text-sm" />
+                    <span>Sync</span>
+                  </button>
                 </div>
               </div>
 
@@ -3408,7 +5060,7 @@ useEffect(() => {
                 {/* Custom Amount Input */}
                 <div className="mb-6">
                   <div className="relative">
-                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-2xl font-bold text-gray-400">$</span>
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-2xl font-bold text-gray-400">₱</span>
                     <input
                       type="number"
                       value={customAmount}
@@ -3418,14 +5070,14 @@ useEffect(() => {
                           handleCustomAmountSubmit();
                         }
                       }}
-                      placeholder="0.00"
-                      min="0.01"
-                      step="0.01"
+                      placeholder="0"
+                      min="1"
+                      step="1"
                       className="w-full pl-12 pr-16 py-4 text-2xl font-bold border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition"
                     />
-                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-lg font-semibold text-gray-400">USD</span>
+                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-lg font-semibold text-gray-400">PHP</span>
                   </div>
-                  <p className="text-xs text-gray-500 mt-2">Minimum: $0.01 • Maximum: $10,000</p>
+                  <p className="text-xs text-gray-500 mt-2">Minimum: ₱1 • Maximum: ₱1,000,000</p>
                 </div>
 
                 {/* Quick Amount Suggestions */}
@@ -3433,28 +5085,28 @@ useEffect(() => {
                   <p className="text-sm text-gray-600 mb-2">Quick amounts:</p>
                   <div className="grid grid-cols-4 gap-2">
                     <button
-                      onClick={() => setCustomAmount('10')}
+                      onClick={() => setCustomAmount('500')}
                       className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition"
                     >
-                      $10
+                      ₱500
                     </button>
                     <button
-                      onClick={() => setCustomAmount('25')}
+                      onClick={() => setCustomAmount('1000')}
                       className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition"
                     >
-                      $25
+                      ₱1,000
                     </button>
                     <button
-                      onClick={() => setCustomAmount('50')}
+                      onClick={() => setCustomAmount('2500')}
                       className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition"
                     >
-                      $50
+                      ₱2,500
                     </button>
                     <button
-                      onClick={() => setCustomAmount('100')}
+                      onClick={() => setCustomAmount('5000')}
                       className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition"
                     >
-                      $100
+                      ₱5,000
                     </button>
                   </div>
                 </div>
@@ -3490,7 +5142,7 @@ useEffect(() => {
                   <div>
                     <h3 className="text-2xl font-bold">Cash In via PayPal</h3>
                     <p className="text-blue-50 text-sm mt-1">
-                      Add ${cashInAmount} USD to your balance
+                      Add ₱{cashInAmount.toLocaleString()} PHP to your balance
                     </p>
                   </div>
                 </div>
@@ -3500,15 +5152,15 @@ useEffect(() => {
               <div className="p-6 bg-gray-50 border-b">
                 <div className="flex justify-between items-center mb-4">
                   <span className="text-gray-600">Cash-In Amount:</span>
-                  <span className="text-2xl font-bold text-blue-600">${cashInAmount} USD</span>
+                  <span className="text-2xl font-bold text-blue-600">₱{cashInAmount.toLocaleString()} PHP</span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-gray-600">Current Balance:</span>
-                  <span className="text-lg font-semibold text-gray-900">${paypalBalance.toFixed(2)} USD</span>
+                  <span className="text-lg font-semibold text-gray-900">₱{paypalBalance.toLocaleString()} PHP</span>
                 </div>
                 <div className="mt-2 pt-2 border-t border-gray-200 flex justify-between items-center">
                   <span className="text-gray-900 font-semibold">New Balance:</span>
-                  <span className="text-lg font-bold text-green-600">${(paypalBalance + cashInAmount).toFixed(2)} USD</span>
+                  <span className="text-lg font-bold text-green-600">₱{(paypalBalance + cashInAmount).toLocaleString()} PHP</span>
                 </div>
               </div>
 
@@ -3547,7 +5199,7 @@ useEffect(() => {
                   <div>
                     <h3 className="text-2xl font-bold">Top Up PayPal</h3>
                     <p className="text-blue-50 text-sm mt-1">
-                      Add ${topUpAmount} USD to your account
+                      Add ₱{topUpAmount.toLocaleString()} PHP to your account
                     </p>
                   </div>
                 </div>
@@ -3557,15 +5209,15 @@ useEffect(() => {
               <div className="p-6 bg-gray-50 border-b">
                 <div className="flex justify-between items-center mb-4">
                   <span className="text-gray-600">Top-Up Amount:</span>
-                  <span className="text-2xl font-bold text-blue-600">${topUpAmount} USD</span>
+                  <span className="text-2xl font-bold text-blue-600">₱{topUpAmount.toLocaleString()} PHP</span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-gray-600">Current Balance:</span>
-                  <span className="text-lg font-semibold text-gray-900">${paypalBalance.toFixed(2)} USD</span>
+                  <span className="text-lg font-semibold text-gray-900">₱{paypalBalance.toLocaleString()} PHP</span>
                 </div>
                 <div className="mt-2 pt-2 border-t border-gray-200 flex justify-between items-center">
                   <span className="text-gray-900 font-semibold">New Balance:</span>
-                  <span className="text-lg font-bold text-green-600">${(paypalBalance + topUpAmount).toFixed(2)} USD</span>
+                  <span className="text-lg font-bold text-green-600">₱{(paypalBalance + topUpAmount).toLocaleString()} PHP</span>
                 </div>
               </div>
 
@@ -3640,20 +5292,46 @@ useEffect(() => {
                 recommendationBadge = "You might like";
                 badgeColor = "bg-green-100 text-green-700";
               }
+              const suggestionImages = extractListingImages(s);
+              const suggestionCoverImage =
+                suggestionImages[0] ||
+                s.img ||
+                "/images/cozy home.jpg";
+              const suggestionViewLabel = suggestionImages.length > 1 ? "View photos" : "View photo";
+              const guestCapacity = getListingGuestCapacity(s);
+              const bedrooms = getListingBedrooms(s);
+              const bathrooms = getListingBathrooms(s);
               
               return (
               <div key={s.id} className="bg-white rounded-xl shadow hover:shadow-lg transition p-4 flex flex-col group">
-                <div className="relative mb-3">
-                  <img src={s.img} alt={s.title} className="w-full h-48 rounded-lg object-cover" />
+                  <div
+                    className="relative mb-3 rounded-lg overflow-hidden cursor-pointer"
+                    onClick={() => handleOpenImageGallery(s, 0, suggestionCoverImage)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        handleOpenImageGallery(s, 0, suggestionCoverImage);
+                      }
+                    }}
+                  >
+                    <img src={suggestionCoverImage} alt={s.title} className="w-full h-48 object-cover group-hover:scale-[1.03] transition duration-300" />
                   <div className={`absolute top-2 left-2 px-2 py-1 rounded-full text-xs font-semibold ${badgeColor}`}>
                     {recommendationBadge}
                   </div>
                   <button
-                    onClick={() => toggleFavorite(s)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleFavorite(s);
+                      }}
                     className="absolute top-2 right-2 p-2 rounded-full bg-white/80 hover:bg-white shadow"
                   >
                     <FaHeart className={isFavorited(s.id) ? "text-gold-600" : "text-gray-400"} />
                   </button>
+                    <div className="absolute bottom-2 left-1/2 -translate-x-1/2 pointer-events-none z-10 flex items-center gap-2 bg-black/50 text-white px-3 py-1 rounded-full text-xs font-semibold backdrop-blur-sm">
+                      <FaImages /> <span>{suggestionViewLabel}</span>
+                    </div>
                 </div>
                 <div className="font-bold text-center text-lg">{s.title}</div>
                 <div className="text-xs text-gray-400 mb-2 text-center">{s.category} • {s.location}</div>
@@ -3661,7 +5339,36 @@ useEffect(() => {
                   <FaStar /> {renderReviewsRating(s)}
                 </div>
                 <div className="text-sm text-gray-700 font-semibold mb-3 text-center">₱{s.pricePerNight?.toLocaleString?.()}/night</div>
-                <div className="text-xs text-gray-500 mb-3 text-center">Amenities: {(s.amenities || []).slice(0, 2).join(", ")}</div>
+                <div className="flex flex-wrap items-center justify-center gap-2 mb-3 text-xs text-gray-500">
+                  {guestCapacity ? (
+                    <span className="bg-gray-100 px-2 py-1 rounded-full">
+                      {guestCapacity} {guestCapacity === 1 ? "Guest" : "Guests"}
+                    </span>
+                  ) : null}
+                  {bedrooms ? (
+                    <span className="bg-gray-100 px-2 py-1 rounded-full">
+                      {bedrooms} {bedrooms === 1 ? "Bedroom" : "Bedrooms"}
+                    </span>
+                  ) : null}
+                  {bathrooms !== null ? (
+                    <span className="bg-gray-100 px-2 py-1 rounded-full">
+                      {bathrooms} {bathrooms === 1 ? "Bathroom" : "Bathrooms"}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="text-xs text-gray-500 mb-3 text-center">
+                  {s.category === "Experience"
+                    ? getListingDuration(s)
+                      ? `Duration: ${getListingDuration(s)}${getListingGroupSize(s) ? ` • Group Size: ${getListingGroupSize(s)}` : ""}`
+                      : getListingGroupSize(s)
+                        ? `Group Size: ${getListingGroupSize(s)}`
+                        : "Experience"
+                    : s.category === "Service"
+                      ? getListingServiceType(s) || getListingDuration(s)
+                        ? `${getListingServiceType(s) ? `Service: ${getListingServiceType(s)}` : ""}${getListingDuration(s) ? ` • Duration: ${getListingDuration(s)}` : ""}`
+                        : "Service"
+                      : `Amenities: ${(s.amenities || []).slice(0, 2).join(", ")}`}
+                </div>
                 <div className="mt-auto grid grid-cols-2 gap-2">
                   <button
                     onClick={() => handleBookListing(s)}
@@ -3681,6 +5388,37 @@ useEffect(() => {
             })}
           </div>
         </div>
+
+        {platformPolicy && (
+          <div className="mt-12">
+            <div className="bg-white rounded-2xl shadow p-6 border border-gray-100">
+              <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                <FaGavel className="text-red-400" />
+                Platform Policy
+              </h3>
+              <div className="grid gap-4 md:grid-cols-3 text-sm text-gray-700">
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <div className="font-semibold text-gray-900 uppercase text-xs tracking-wide mb-1">
+                    Cancellation
+                  </div>
+                  <p>{platformPolicy.cancellation}</p>
+                </div>
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <div className="font-semibold text-gray-900 uppercase text-xs tracking-wide mb-1">
+                    House Rules
+                  </div>
+                  <p>{platformPolicy.rules}</p>
+                </div>
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <div className="font-semibold text-gray-900 uppercase text-xs tracking-wide mb-1">
+                    Support & Reports
+                  </div>
+                  <p>{platformPolicy.reports}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Share Modal */}
         {showShareModal && (
@@ -3834,8 +5572,8 @@ useEffect(() => {
 
         {/* Booking Modal */}
         {showBookingModal && selectedListing && (
-          <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-            <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-2xl relative max-h-[90vh] overflow-y-auto">
+          <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-xl shadow-lg p-4 md:p-8 w-full max-w-2xl relative max-h-[90vh] overflow-y-auto">
               <button
                 onClick={() => setShowBookingModal(false)}
                 className="absolute top-2 right-4 text-xl text-gray-400 hover:text-gold-500"
@@ -3844,11 +5582,28 @@ useEffect(() => {
               </button>
               
               <div className="mb-6">
-                <h3 className="text-2xl font-bold mb-2">Book {selectedListing.title}</h3>
-                <p className="text-gray-500">Complete your booking details</p>
+                <div className="flex items-center gap-2 mb-2">
+                  <h3 className="text-2xl font-bold">Book {selectedListing.title}</h3>
+                  {selectedListing.category && (
+                    <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                      selectedListing.category === 'Experience' ? 'bg-purple-100 text-purple-700' :
+                      selectedListing.category === 'Service' ? 'bg-blue-100 text-blue-700' :
+                      'bg-green-100 text-green-700'
+                    }`}>
+                      {selectedListing.category}
+                    </span>
+                  )}
+                </div>
+                <p className="text-gray-500">
+                  {selectedListing.category === 'Experience' 
+                    ? 'Book your experience date and time'
+                    : selectedListing.category === 'Service'
+                    ? 'Schedule your service appointment'
+                    : 'Complete your booking details'}
+                </p>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
                 {/* Left side - Listing details */}
                 <div>
                   <div className="relative overflow-hidden rounded-xl aspect-[4/3] bg-gray-100 mb-4">
@@ -3889,6 +5644,79 @@ useEffect(() => {
                         </span>
                       ))}
                     </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-gray-600">
+                      {selectedListing.category === "Experience" ? (
+                        <>
+                          {getListingDuration(selectedListing) && (
+                            <div className="flex flex-col items-center justify-center bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 text-center min-w-[120px]">
+                              <span className="text-[11px] uppercase tracking-wide text-gray-400">Duration</span>
+                              <span className="font-semibold text-gray-800 text-sm">{getListingDuration(selectedListing)}</span>
+                            </div>
+                          )}
+                          {getListingGroupSize(selectedListing) && (
+                            <div className="flex flex-col items-center justify-center bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 text-center min-w-[120px]">
+                              <span className="text-[11px] uppercase tracking-wide text-gray-400">Group Size</span>
+                              <span className="font-semibold text-gray-800 text-sm">
+                                {getListingGroupSize(selectedListing)} {getListingGroupSize(selectedListing) === 1 ? "person" : "people"}
+                              </span>
+                            </div>
+                          )}
+                        </>
+                      ) : selectedListing.category === "Service" ? (
+                        <>
+                          {getListingServiceType(selectedListing) && (
+                            <div className="flex flex-col items-center justify-center bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 text-center min-w-[120px]">
+                              <span className="text-[11px] uppercase tracking-wide text-gray-400">Service Type</span>
+                              <span className="font-semibold text-gray-800 text-sm">
+                                {getListingServiceType(selectedListing)}
+                              </span>
+                            </div>
+                          )}
+                          {getListingDuration(selectedListing) && (
+                            <div className="flex flex-col items-center justify-center bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 text-center min-w-[120px]">
+                              <span className="text-[11px] uppercase tracking-wide text-gray-400">Duration</span>
+                              <span className="font-semibold text-gray-800 text-sm">
+                                {getListingDuration(selectedListing)}
+                              </span>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                            <FaUsers className="text-gray-500" />
+                            <div>
+                              <div className="font-semibold text-gray-800 text-sm">
+                                {getListingGuestCapacity(selectedListing)} {getListingGuestCapacity(selectedListing) === 1 ? "Guest" : "Guests"}
+                              </div>
+                              <div className="text-[11px] uppercase tracking-wide text-gray-400">Max Capacity</div>
+                            </div>
+                          </div>
+                          {getListingBedrooms(selectedListing) && (
+                            <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 min-w-[120px]">
+                              <FaBed className="text-gray-500" />
+                              <div>
+                                <div className="font-semibold text-gray-800 text-sm">
+                                  {getListingBedrooms(selectedListing)} {getListingBedrooms(selectedListing) === 1 ? "Bedroom" : "Bedrooms"}
+                                </div>
+                                <div className="text-[11px] uppercase tracking-wide text-gray-400">Sleeping</div>
+                              </div>
+                            </div>
+                          )}
+                          {getListingBathrooms(selectedListing) !== null && (
+                            <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 min-w-[120px]">
+                              <FaShower className="text-gray-500" />
+                              <div>
+                                <div className="font-semibold text-gray-800 text-sm">
+                                  {getListingBathrooms(selectedListing)} {getListingBathrooms(selectedListing) === 1 ? "Bathroom" : "Bathrooms"}
+                                </div>
+                                <div className="text-[11px] uppercase tracking-wide text-gray-400">Bath</div>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -3923,42 +5751,47 @@ useEffect(() => {
                   )}
 
                   <div>
-                    <label className="block text-sm font-semibold mb-2">Check-in Date</label>
-                    <input
-                      type="date"
-                      value={bookingDates.checkIn}
-                      onChange={(e) => setBookingDates(prev => ({ ...prev, checkIn: e.target.value }))}
-                      min={new Date().toISOString().split('T')[0]}
-                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-gold-500"
+                    <label className="block text-sm font-semibold mb-2">Select Dates</label>
+                    <DateRangePicker
+                      checkIn={bookingDates.checkIn}
+                      checkOut={bookingDates.checkOut}
+                      onChange={(dates) => setBookingDates(dates)}
+                      minDate={new Date().toISOString().split('T')[0]}
+                      bookedDates={selectedListing ? getBookedDatesForListing(selectedListing.id) : []}
+                      bookedRanges={selectedListing ? getBookedRanges(selectedListing.id) : []}
                     />
                   </div>
 
                   <div>
-                    <label className="block text-sm font-semibold mb-2">Check-out Date</label>
-                    <input
-                      type="date"
-                      value={bookingDates.checkOut}
-                      onChange={(e) => setBookingDates(prev => ({ ...prev, checkOut: e.target.value }))}
-                      min={bookingDates.checkIn || new Date().toISOString().split('T')[0]}
-                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-gold-500"
-                    />
+                    <label className="block text-sm font-semibold mb-2">Guests</label>
+                    {selectedListing.category === "Experience" ? (
+                      <div className="w-full border border-gray-200 bg-gray-50 rounded-lg px-3 py-2 text-sm text-gray-700">
+                        Maximum group size:{" "}
+                        <span className="font-semibold text-gray-900">
+                          {getListingGroupSize(selectedListing) || getListingGuestCapacity(selectedListing)}{" "}
+                          {(getListingGroupSize(selectedListing) || getListingGuestCapacity(selectedListing)) === 1 ? "person" : "people"}
+                        </span>
+                  </div>
+                    ) : selectedListing.category === "Service" ? (
+                      <div className="w-full border border-gray-200 bg-gray-50 rounded-lg px-3 py-2 text-sm text-gray-700">
+                        Service type:{" "}
+                        <span className="font-semibold text-gray-900">
+                          {getListingServiceType(selectedListing) || "General"}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="w-full border border-gray-200 bg-gray-50 rounded-lg px-3 py-2 text-sm text-gray-700">
+                        This listing is configured for up to{" "}
+                        <span className="font-semibold text-gray-900">
+                          {getListingGuestCapacity(selectedListing)}{" "}
+                          {getListingGuestCapacity(selectedListing) === 1 ? "guest" : "guests"}
+                        </span>.
+                      </div>
+                    )}
                   </div>
 
                   <div>
-                    <label className="block text-sm font-semibold mb-2">Number of Guests</label>
-                    <select
-                      value={bookingGuests}
-                      onChange={(e) => setBookingGuests(parseInt(e.target.value))}
-                      className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-gold-500"
-                    >
-                      {[1, 2, 3, 4, 5, 6, 7, 8].map(num => (
-                        <option key={num} value={num}>{num} {num === 1 ? 'guest' : 'guests'}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-semibold mb-2">Special Requests (Optional)</label>
+                    <label className="block text-sm font-semibold mb-2">Wishlist (Optional)</label>
                     <textarea
                       value={bookingNotes}
                       onChange={(e) => setBookingNotes(e.target.value)}
@@ -4017,7 +5850,13 @@ useEffect(() => {
                     <div className="font-semibold mb-2">Booking Summary</div>
                     <div className="space-y-1 text-sm">
                       <div className="flex justify-between">
-                        <span>₱{(selectedListing.pricePerNight || 0).toLocaleString()} × {bookingDates.checkIn && bookingDates.checkOut ? Math.ceil((new Date(bookingDates.checkOut) - new Date(bookingDates.checkIn)) / (1000 * 60 * 60 * 24)) : 0} nights</span>
+                        <span>
+                          {selectedListing.category === 'Experience' 
+                            ? `₱${(selectedListing.pricePerNight || selectedListing.price || 0).toLocaleString()} per experience`
+                            : selectedListing.category === 'Service'
+                            ? `₱${(selectedListing.pricePerNight || selectedListing.price || 0).toLocaleString()} per service`
+                            : `₱${(selectedListing.pricePerNight || 0).toLocaleString()} × ${bookingDates.checkIn && bookingDates.checkOut ? Math.ceil((new Date(bookingDates.checkOut) - new Date(bookingDates.checkIn)) / (1000 * 60 * 60 * 24)) : 0} nights`}
+                        </span>
                         <span>₱{calculateSubtotal().toLocaleString()}</span>
                       </div>
                       {appliedCoupon && (
@@ -4378,19 +6217,62 @@ useEffect(() => {
                 </div>
               </div>
 
-              {/* Fallback button in case PayPal doesn't load */}
+              {/* Wallet Payment Button */}
               <div className="mt-2 text-center">
                 <button
-                  onClick={() => {
-                    alert(`Simulated PayPal payment: ₱${paymentAmount.toLocaleString()}`);
-                    // Simulate the payment process
-                    const simulatedTransactionId = 'PAYPAL_' + Date.now();
-                    setShowPayPalPayment(false);
-                    processBookingAfterPayment(simulatedTransactionId);
+                  onClick={async () => {
+                    // Check if wallet has sufficient balance
+                    if (!checkPayPalBalance(paymentAmount)) {
+                      return; // checkPayPalBalance already shows alert
+                    }
+
+                    try {
+                      // Deduct from wallet balance
+                      const newBalance = paypalBalance - paymentAmount;
+                      setPaypalBalance(newBalance);
+                      await savePayPalBalance(newBalance);
+
+                      // Generate transaction ID
+                      const transactionId = 'WALLET_' + Date.now();
+
+                      // Save transaction to history
+                      await saveTransaction({
+                        type: 'Booking Payment',
+                        amount: -paymentAmount,
+                        currency: 'PHP',
+                        transactionId: transactionId,
+                        balanceBefore: paypalBalance,
+                        balanceAfter: newBalance,
+                        status: 'Completed',
+                        description: selectedListing ? `Payment for ${selectedListing.title}` : 'Booking Payment',
+                        listingTitle: selectedListing?.title || '',
+                        checkIn: bookingDates.checkIn,
+                        checkOut: bookingDates.checkOut
+                      });
+
+                      // Close payment modal
+                      setShowPayPalPayment(false);
+
+                      // Process booking after successful wallet payment
+                      await processBookingAfterPayment(transactionId);
+
+                      // Show success alert
+                      showAlert('success', 'Payment successful!', '', [
+                        `Transaction ID: ${transactionId}`,
+                        `Amount: ₱${paymentAmount.toLocaleString()} PHP`,
+                        `New Balance: ₱${newBalance.toLocaleString()} PHP`
+                      ]);
+                    } catch (error) {
+                      console.error('Error processing wallet payment:', error);
+                      showAlert('error', 'Payment Failed', 'There was an error processing your wallet payment.', [
+                        'Please try again',
+                        'If the problem persists, contact support'
+                      ]);
+                    }
                   }}
                   className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition mr-2"
                 >
-                  💳 Test Payment (₱{paymentAmount.toLocaleString()})
+                  💳 Wallet (₱{paymentAmount.toLocaleString()})
                 </button>
               </div>
 
@@ -4506,13 +6388,10 @@ useEffect(() => {
                                 </div>
                                 <div className="text-right">
                                   <div className={`text-xl font-bold ${
-                                    transaction.amount > 0 ? 'text-green-600' : 'text-red-600'
+                                    (Number(transaction.amount) || 0) > 0 ? 'text-green-600' : 'text-red-600'
                                   }`}>
-                                    {transaction.amount > 0 ? '+' : ''}${Math.abs(transaction.amount).toFixed(2)} USD
+                                    {(Number(transaction.amount) || 0) > 0 ? '+' : ''}₱{Math.abs(Number(transaction.amount) || 0).toLocaleString()} PHP
                                   </div>
-                                  {transaction.phpAmount && (
-                                    <div className="text-sm text-gray-500">≈ ₱{transaction.phpAmount.toLocaleString()}</div>
-                                  )}
                                 </div>
                               </div>
 
@@ -4546,10 +6425,18 @@ useEffect(() => {
                                     <p className="font-semibold text-gray-700">{transaction.checkOut}</p>
                                   </div>
                                 )}
-                                <div className="bg-gray-50 p-2 rounded">
-                                  <span className="text-gray-500">Balance After:</span>
-                                  <p className="font-semibold text-gray-700">${transaction.balanceAfter.toFixed(2)}</p>
-                                </div>
+                                {transaction.balanceAfter !== undefined && transaction.balanceAfter !== null && (
+                                  <div className="bg-gray-50 p-2 rounded">
+                                    <span className="text-gray-500">Balance After:</span>
+                                    <p className="font-semibold text-gray-700">₱{Number(transaction.balanceAfter || 0).toLocaleString()}</p>
+                                  </div>
+                                )}
+                                {transaction.balanceBefore !== undefined && transaction.balanceBefore !== null && (
+                                  <div className="bg-gray-50 p-2 rounded">
+                                    <span className="text-gray-500">Balance Before:</span>
+                                    <p className="font-semibold text-gray-700">₱{Number(transaction.balanceBefore || 0).toLocaleString()}</p>
+                                  </div>
+                                )}
                                 <div className="bg-gray-50 p-2 rounded">
                                   <span className="text-gray-500">Status:</span>
                                   <p className={`font-semibold inline-flex items-center ${

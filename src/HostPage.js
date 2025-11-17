@@ -11,13 +11,16 @@ import {
   query, 
   where,
   orderBy,
-  onSnapshot
+  onSnapshot,
+  serverTimestamp,
+  limit,
+  increment
 } from "firebase/firestore";
 import { initializeDashboardMetrics, updateDashboardMetrics, incrementDashboardMetrics } from './utils/dashboardMetrics';
 import { db, auth } from "./firebase";
 import { 
   FaHome, FaClipboardList, FaSave, FaImages, FaEnvelope, FaCalendarAlt, FaChartPie, 
-  FaWallet, FaUser, FaGift, FaSignOutAlt, FaPlus, FaEdit, FaTrash, FaStar, FaTag, 
+  FaWallet, FaUser, FaGift, FaSignOutAlt, FaPlus, FaEdit, FaTrash, FaStar, FaTag, FaBars, 
   FaPhone, FaSms, FaMailBulk, FaCreditCard, FaGavel, FaComments, FaClock, 
   FaMoneyBillWave, FaCog, FaEye, FaToggleOn, FaToggleOff, FaCheckCircle, FaTimes,
   FaChevronRight, FaChevronLeft, FaGlobe, FaHeart, FaShareAlt, FaLocationMarker,
@@ -31,6 +34,12 @@ import {
 import Messages from "./components/Messages";
 import { approveBookingTransaction } from "./utils/transactions";
 import ChatList from "./components/ChatList";
+import emailjs from '@emailjs/browser';
+import { EMAILJS_CONFIG, EMAILJS_BOOKING_CONFIG, EMAILJS_DECLINED_CONFIG, PAYPAL_CONFIG } from "./config";
+import { buildBookingConfirmationTemplate, buildBookingDeclinedTemplate } from "./utils/emailTemplates";
+
+// Initialize EmailJS for booking confirmations (new account)
+emailjs.init(EMAILJS_BOOKING_CONFIG.PUBLIC_KEY);
 
 
 function HostPage({ onLogout }) {
@@ -41,6 +50,8 @@ useEffect(() => {
 
   // Active tab state for navigation
   const [activeTab, setActiveTab] = useState("overview");
+  const [selectedCategory, setSelectedCategory] = useState("All");
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
 
 
   // Enhanced states for functional checklist
@@ -91,29 +102,38 @@ useEffect(() => {
         // Sync wallet balance with total earnings
         setWalletBalance(data.totalEarnings || 0);
         
-        // Calculate points and level based on bookings
-        const totalBookings = data.totalBookings || 0;
-        const calculatedPoints = totalBookings * 50; // 50 points per booking
-        setHostPoints(calculatedPoints);
+        // Load points from Firestore (source of truth)
+        const currentPoints = data.points || 0;
+        setHostPoints(currentPoints);
         
-        // Determine level based on bookings
+        // Determine level based on bookings - level up every 6 bookings
+        // Level 1 (Bronze): 0-5 bookings
+        // Level 2 (Silver): 6-11 bookings
+        // Level 3 (Gold): 12-17 bookings
+        // Level 4 (Platinum): 18-23 bookings
+        // Level 5 (Diamond): 24-29 bookings
+        // Level 6 (Master): 30-35 bookings
+        // Level 7 (Elite): 36-41 bookings
+        // Level 8 (Legend): 42+ bookings
+        const totalBookings = data.totalBookings || 0;
+        const levelNumber = Math.floor(totalBookings / 6) + 1;
         let level = 'Bronze Host';
-        if (totalBookings >= 100) level = 'Diamond Host';
-        else if (totalBookings >= 50) level = 'Platinum Host';
-        else if (totalBookings >= 25) level = 'Gold Host';
-        else if (totalBookings >= 10) level = 'Silver Host';
+        
+        if (levelNumber >= 8) level = 'Legend Host';
+        else if (levelNumber >= 7) level = 'Elite Host';
+        else if (levelNumber >= 6) level = 'Master Host';
+        else if (levelNumber >= 5) level = 'Diamond Host';
+        else if (levelNumber >= 4) level = 'Platinum Host';
+        else if (levelNumber >= 3) level = 'Gold Host';
+        else if (levelNumber >= 2) level = 'Silver Host';
+        else level = 'Bronze Host';
+        
         setHostLevel(level);
         
-        // Calculate realistic host rating based on bookings
-        if (totalBookings > 0) {
-          // Base rating starts at 4.5, improves with more bookings
-          const baseRating = 4.5;
-          const bonusRating = Math.min(0.5, (totalBookings / 100) * 0.5);
-          const calculatedRating = Math.min(5.0, baseRating + bonusRating);
-          setDashboard(prev => ({ ...prev, hostRating: Number(calculatedRating.toFixed(1)) }));
-        } else {
-          setDashboard(prev => ({ ...prev, hostRating: 0 }));
-        }
+        // Calculate host rating from actual average rating in dashboard metrics
+        // This will be updated when reviews are calculated
+        const currentRating = data.averageRating || data.hostRating || 0;
+        setDashboard(prev => ({ ...prev, hostRating: Number(currentRating.toFixed(1)) }));
       }
     });
 
@@ -128,8 +148,76 @@ useEffect(() => {
       setListings(updatedListings);
     });
 
+    // Recalculate totalBookings from actual approved bookings and sync with dashboard metrics
+    const recalculateTotalBookings = async () => {
+      try {
+        const approvedBookingsQuery = query(
+          bookingsRef,
+          where("hostId", "==", auth.currentUser.uid),
+          where("status", "in", ["Upcoming", "Completed"])
+        );
+        const approvedBookingsSnapshot = await getDocs(approvedBookingsQuery);
+        const actualTotalBookings = approvedBookingsSnapshot.size;
+        
+        // Update dashboard metrics with actual count
+        const metricsRef = doc(db, "dashboardMetrics", auth.currentUser.uid);
+        const metricsSnap = await getDoc(metricsRef);
+        
+        if (metricsSnap.exists()) {
+          const currentTotal = metricsSnap.data().totalBookings || 0;
+          if (actualTotalBookings !== currentTotal) {
+            // Update to actual count - this will trigger the dashboardMetrics onSnapshot
+            // which will recalculate the level automatically
+            await updateDoc(metricsRef, {
+              totalBookings: actualTotalBookings,
+              lastUpdated: new Date().toISOString()
+            });
+            console.log(`✅ Updated totalBookings from ${currentTotal} to ${actualTotalBookings}. Level will be recalculated.`);
+          }
+        } else {
+          // Initialize if doesn't exist
+          await initializeDashboardMetrics(auth.currentUser.uid);
+          await updateDoc(metricsRef, {
+            totalBookings: actualTotalBookings,
+            lastUpdated: new Date().toISOString()
+          });
+          console.log(`✅ Initialized totalBookings: ${actualTotalBookings}`);
+        }
+
+        // Calculate and award points for all existing approved/completed bookings
+        // Points: 50 points per approved booking
+        const pointsPerBooking = 50;
+        const totalPointsToAward = actualTotalBookings * pointsPerBooking;
+        
+        if (totalPointsToAward > 0) {
+          const currentMetrics = metricsSnap.exists() ? metricsSnap.data() : {};
+          const currentPoints = currentMetrics.points || 0;
+          const currentTotalPointsEarned = currentMetrics.totalPointsEarned || 0;
+          
+          // Only update if the calculated points are more than what's currently stored
+          // This ensures we don't double-count points
+          const expectedPoints = actualTotalBookings * pointsPerBooking;
+          
+          if (currentTotalPointsEarned < expectedPoints) {
+            const pointsToAdd = expectedPoints - currentTotalPointsEarned;
+            await updateDoc(metricsRef, {
+              points: increment(pointsToAdd),
+              totalPointsEarned: expectedPoints,
+              lastUpdated: new Date().toISOString()
+            });
+            console.log(`✅ Awarded ${pointsToAdd} points retroactively for ${actualTotalBookings} existing bookings. Total points: ${expectedPoints}`);
+          }
+        }
+      } catch (error) {
+        console.error("Error recalculating totalBookings:", error);
+      }
+    };
+
+    // Recalculate on mount to fix any discrepancies
+    recalculateTotalBookings();
+
     // Subscribe to bookings updates
-    const unsubBookings = onSnapshot(bookingsQuery, (snapshot) => {
+    const unsubBookings = onSnapshot(bookingsQuery, async (snapshot) => {
       const bookings = snapshot.docs
         .filter(doc => {
           const data = doc.data();
@@ -143,6 +231,82 @@ useEffect(() => {
 
       // Store bookings in state for calendar
       setBookings(bookings);
+
+      // Create booking transactions from bookings
+      const bookingTxns = bookings
+        .filter(b => b.status === 'Upcoming' || b.status === 'Completed' || b.status === 'CancelledByGuest' || b.status === 'Declined')
+        .map(booking => {
+          const bookingDate = booking.createdAt?.toDate ? booking.createdAt.toDate() : 
+                             booking.createdAt ? new Date(booking.createdAt) : 
+                             booking.bookingDate?.toDate ? booking.bookingDate.toDate() :
+                             booking.bookingDate ? new Date(booking.bookingDate) : new Date();
+          
+          if (booking.status === 'CancelledByGuest') {
+            // Cancellation - host receives 25% payout (positive amount)
+            const totalAmount = booking.total || booking.price || 0;
+            const hostPayout = totalAmount * 0.25; // 25% of original total
+            
+            return {
+              id: `booking-${booking.id}-cancel`,
+              type: 'cancellation-payout',
+              displayType: 'Cancellation Payout (25%)',
+              amount: hostPayout, // Positive - host receives 25%
+              description: `25% Cancellation payout: ${booking.title || 'Booking'} - ${booking.guestName || 'Guest'}`,
+              bookingId: booking.id,
+              guestName: booking.guestName || 'Guest',
+              listingTitle: booking.title || '',
+              checkIn: booking.checkIn,
+              checkOut: booking.checkOut,
+              status: 'completed',
+              date: booking.cancelledAt || booking.updatedAt || bookingDate,
+              createdAt: booking.cancelledAt?.toDate ? booking.cancelledAt.toDate().toISOString() : 
+                        booking.cancelledAt ? new Date(booking.cancelledAt).toISOString() :
+                        booking.updatedAt?.toDate ? booking.updatedAt.toDate().toISOString() :
+                        booking.updatedAt ? new Date(booking.updatedAt).toISOString() : bookingDate.toISOString()
+            };
+          } else if (booking.status === 'Declined') {
+            // Declined booking - no transaction (refund goes to guest, host never received payment)
+            return null;
+          } else if (booking.status === 'Upcoming' || booking.status === 'Completed') {
+            // Approved booking - show earnings (positive)
+            const totalAmount = booking.total || booking.price || 0;
+            // Get service fee from booking or calculate (default 5%)
+            const serviceFeePercent = booking.serviceFeePercent || 5;
+            const hostEarnings = totalAmount * (1 - serviceFeePercent / 100);
+            
+            return {
+              id: `booking-${booking.id}`,
+              type: 'booking',
+              displayType: 'Booking Payment',
+              amount: hostEarnings,
+              description: `Booking: ${booking.title || 'Booking'} - ${booking.guestName || 'Guest'}`,
+              bookingId: booking.id,
+              guestName: booking.guestName || 'Guest',
+              listingTitle: booking.title || '',
+              checkIn: booking.checkIn,
+              checkOut: booking.checkOut,
+              status: booking.status === 'Completed' ? 'completed' : 'upcoming',
+              date: booking.paidAt || booking.createdAt || bookingDate,
+              createdAt: booking.paidAt?.toDate ? booking.paidAt.toDate().toISOString() :
+                        booking.paidAt ? new Date(booking.paidAt).toISOString() :
+                        booking.createdAt?.toDate ? booking.createdAt.toDate().toISOString() :
+                        booking.createdAt ? new Date(booking.createdAt).toISOString() : bookingDate.toISOString()
+            };
+          }
+          return null;
+        })
+        .filter(txn => txn !== null);
+      
+      setBookingTransactions(bookingTxns);
+
+      // Recalculate totalBookings when bookings change (only count approved bookings)
+      const approvedCount = bookings.filter(b => 
+        b.status === "Upcoming" || b.status === "Completed"
+      ).length;
+      
+      // Only recalculate if the count might have changed
+      // This prevents unnecessary Firestore updates
+      recalculateTotalBookings();
 
       // Update listings with booking counts and revenue
       setListings(currentListings => {
@@ -197,11 +361,68 @@ useEffect(() => {
       });
     });
 
+    // Subscribe to withdrawal requests for this host
+    const withdrawalRequestsQuery = query(
+      collection(db, "withdrawalRequests"),
+      where("hostId", "==", auth.currentUser?.uid)
+    );
+    
+    const unsubWithdrawalRequests = onSnapshot(withdrawalRequestsQuery, (snapshot) => {
+      const requests = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })).sort((a, b) => {
+        // Sort by requestedAt descending (most recent first)
+        const dateA = a.requestedAt?.toDate ? a.requestedAt.toDate() : 
+                     a.requestedAt ? new Date(a.requestedAt) : 
+                     a.createdAt ? new Date(a.createdAt) : new Date(0);
+        const dateB = b.requestedAt?.toDate ? b.requestedAt.toDate() : 
+                     b.requestedAt ? new Date(b.requestedAt) : 
+                     b.createdAt ? new Date(b.createdAt) : new Date(0);
+        return dateB - dateA;
+      });
+      setWithdrawalRequests(requests);
+    }, (error) => {
+      console.error('Error loading withdrawal requests:', error);
+    });
+
+    // Subscribe to transactions for this host (real-time)
+    const transactionsRef = collection(db, "transactions");
+    const transactionsQuery = query(
+      transactionsRef,
+      where("userId", "==", auth.currentUser?.uid)
+    );
+    
+    const unsubTransactions = onSnapshot(transactionsQuery, (snapshot) => {
+      const loadedTransactions = snapshot.docs
+        .map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }))
+        .sort((a, b) => {
+          // Sort by date descending (most recent first)
+          const dateA = a.date?.toDate ? a.date.toDate() : 
+                       a.date ? new Date(a.date) : 
+                       a.createdAt ? new Date(a.createdAt) : new Date(0);
+          const dateB = b.date?.toDate ? b.date.toDate() : 
+                       b.date ? new Date(b.date) : 
+                       b.createdAt ? new Date(b.createdAt) : new Date(0);
+          return dateB - dateA;
+        })
+        .slice(0, 100); // Limit to 100 most recent
+      setTransactions(loadedTransactions);
+      console.log('Loaded transactions from Firestore:', loadedTransactions.length);
+    }, (error) => {
+      console.error('Error loading transactions:', error);
+    });
+
     // Cleanup
     return () => {
       unsubListings();
       unsubBookings();
       unsubDashboard();
+      unsubWithdrawalRequests();
+      unsubTransactions();
     };
   }, []);
   const [dashboard, setDashboard] = useState({
@@ -258,6 +479,8 @@ useEffect(() => {
   const [couponsLoaded, setCouponsLoaded] = useState(false);
   const [showRewardsModal, setShowRewardsModal] = useState(false);
   const [showAddCouponModal, setShowAddCouponModal] = useState(false);
+  const [showRedeemPointsModal, setShowRedeemPointsModal] = useState(false);
+  const [redeemPointsAmount, setRedeemPointsAmount] = useState('');
   const [newCoupon, setNewCoupon] = useState({
     name: '',
     discount: '',
@@ -280,19 +503,115 @@ useEffect(() => {
   // Wallet & Earnings State
   const [walletBalance, setWalletBalance] = useState(0);
   const [transactions, setTransactions] = useState([]);
+  const [bookingTransactions, setBookingTransactions] = useState([]);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [withdrawAmount, setWithdrawAmount] = useState('');
-  const [withdrawMethod, setWithdrawMethod] = useState('GCash');
+  const [paypalEmail, setPaypalEmail] = useState('');
+  const [withdrawalRequests, setWithdrawalRequests] = useState([]);
 
   // Functional checklist implementations
   
 
   // 2. Save as draft functionality
-  const handleSaveDraft = (listingId) => {
-    setListings(listings.map(l => 
-      l.id === listingId ? { ...l, status: "Draft", updatedAt: new Date().toISOString() } : l
-    ));
-    alert("Listing saved as draft!");
+  const handleSaveDraft = async (isEdit = false) => {
+    // Validate required fields
+    if (!newListing.title || !newListing.price || !newListing.location) {
+      alert("Please fill in at least title, price, and location to save as draft.");
+      return;
+    }
+
+    const price = parseFloat(newListing.price);
+    if (isNaN(price) || price <= 0) {
+      alert("Please enter a valid price greater than 0.");
+      return;
+    }
+
+    const listing = {
+      ...newListing,
+      price: parseFloat(newListing.price),
+      pricePerNight: parseFloat(newListing.price),
+      status: "Draft", // Set to Draft status
+      rating: isEdit && editingListing ? editingListing.rating : 0,
+      discount: isEdit && editingListing ? editingListing.discount : 0,
+      promo: isEdit && editingListing ? editingListing.promo : "None",
+      createdAt: isEdit && editingListing ? editingListing.createdAt : new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+      views: isEdit && editingListing ? editingListing.views : 0,
+      bookings: isEdit && editingListing ? editingListing.bookings : 0,
+      revenue: isEdit && editingListing ? editingListing.revenue : 0,
+      superhost: profile.superhost || false,
+      host: profile.name || "Anonymous Host",
+      hostId: auth.currentUser?.uid,
+      hostAvatar: profile.avatar,
+      img: newListing.uploadedImages[0] || (isEdit && editingListing ? editingListing.img : "https://images.unsplash.com/photo-1505691924083-fb6d2ee58f58?q=80&w=1200&auto=format&fit=crop")
+    };
+
+    try {
+      if (isEdit && editingListing) {
+        // Update existing listing as draft
+        const hostListingRef = doc(db, "hostListings", editingListing.id);
+        await updateDoc(hostListingRef, {
+          ...listing,
+          status: "Draft",
+          lastUpdated: new Date().toISOString()
+        });
+
+        // Also update in public listings if it exists
+        if (editingListing.publicListingId) {
+          const publicListingRef = doc(db, "listings", editingListing.publicListingId);
+          await updateDoc(publicListingRef, {
+            ...listing,
+            status: "Draft",
+            lastUpdated: new Date().toISOString()
+          });
+        }
+
+        // Update local state
+        setListings(listings.map(l => 
+          l.id === editingListing.id ? { ...l, ...listing, status: "Draft" } : l
+        ));
+        setShowEditListing(false);
+        alert("Listing saved as draft!");
+      } else {
+        // Create new listing as draft
+        const hostListingRef = await addDoc(collection(db, "hostListings"), {
+          ...listing,
+          hostId: auth.currentUser?.uid,
+          status: "Draft",
+          createdAt: new Date().toISOString(),
+          lastUpdated: new Date().toISOString()
+        });
+
+        const addedListing = { 
+          id: hostListingRef.id, 
+          ...listing,
+          status: "Draft"
+        };
+        
+        setListings([addedListing, ...listings]);
+        setShowAddListing(false);
+        alert("Listing saved as draft! You can publish it later from your listings page.");
+      }
+
+      // Reset form
+      setNewListing({
+        title: '',
+        category: 'Home',
+        description: '',
+        price: '',
+        location: '',
+        amenities: [],
+        images: [],
+        uploadedImages: [],
+        maxGuests: 4,
+        bedrooms: 2,
+        bathrooms: 1
+      });
+      setEditingListing(null);
+    } catch (error) {
+      console.error("Error saving draft:", error);
+      alert("Failed to save draft. Please try again.");
+    }
   };
 
   // 3. Add new listing
@@ -507,13 +826,71 @@ useEffect(() => {
     }
   };
 
-  // Toggle listing status (Active/Draft)
-  const handleToggleListingStatus = (listingId) => {
-    setListings(listings.map(l => 
-      l.id === listingId 
-        ? { ...l, status: l.status === 'Active' ? 'Draft' : 'Active' }
-        : l
-    ));
+  // Toggle listing status (Active/Draft) and update in Firestore
+  const handleToggleListingStatus = async (listingId) => {
+    try {
+      const listing = listings.find(l => l.id === listingId);
+      if (!listing) {
+        alert("Listing not found.");
+        return;
+      }
+
+      const newStatus = listing.status === 'Active' ? 'Draft' : 'Active';
+      
+      // Update in hostListings collection (always exists)
+      const hostListingRef = doc(db, "hostListings", listingId);
+      await updateDoc(hostListingRef, { 
+        status: newStatus,
+        lastUpdated: new Date().toISOString()
+      });
+
+      // Check if listing exists in public listings collection
+      const listingRef = doc(db, "listings", listingId);
+      const listingSnap = await getDoc(listingRef);
+
+      if (newStatus === 'Active') {
+        // Publishing: Create in listings collection if it doesn't exist
+        if (!listingSnap.exists()) {
+          // Create the public listing
+          const publicListingData = {
+            ...listing,
+            id: listingId,
+            hostListingId: listingId,
+            status: 'Active',
+            lastUpdated: new Date().toISOString()
+          };
+          // Remove the id field before adding to Firestore (Firestore will use the document ID)
+          const { id, ...listingDataWithoutId } = publicListingData;
+          await setDoc(listingRef, listingDataWithoutId);
+        } else {
+          // Update existing public listing
+          await updateDoc(listingRef, { 
+            status: 'Active',
+            lastUpdated: new Date().toISOString()
+          });
+        }
+      } else {
+        // Unpublishing: Only update if it exists in listings collection
+        if (listingSnap.exists()) {
+          await updateDoc(listingRef, { 
+            status: 'Draft',
+            lastUpdated: new Date().toISOString()
+          });
+        }
+      }
+
+      // Update local state
+      setListings(listings.map(l => 
+        l.id === listingId 
+          ? { ...l, status: newStatus }
+          : l
+      ));
+
+      alert(`Listing ${newStatus === 'Active' ? 'published' : 'unpublished'} successfully!`);
+    } catch (error) {
+      console.error("Error toggling listing status:", error);
+      alert(`Failed to update listing status: ${error.message || 'Please try again.'}`);
+    }
   };
 
   // PayPal Integration Functions
@@ -774,9 +1151,20 @@ useEffect(() => {
     
     const occupancyRate = totalAvailableNights > 0 ? Math.min(Math.round((nightsBooked / totalAvailableNights) * 100), 100) : 0;
 
-    // Calculate average rating from all listings
-    const ratingsSum = listings.reduce((sum, l) => sum + (l.rating || 0), 0);
-    const averageRating = listings.length > 0 ? Number((ratingsSum / listings.length).toFixed(1)) : 0;
+    // Calculate average rating from all listings that have ratings (only count listings with rating > 0)
+    const listingsWithRatings = listings.filter(l => l.rating && l.rating > 0);
+    const ratingsSum = listingsWithRatings.reduce((sum, l) => sum + (l.rating || 0), 0);
+    const averageRating = listingsWithRatings.length > 0 ? Number((ratingsSum / listingsWithRatings.length).toFixed(1)) : 0;
+
+    // Update host rating in dashboard metrics in Firestore
+    if (averageRating > 0 && auth.currentUser?.uid) {
+      const metricsRef = doc(db, "dashboardMetrics", auth.currentUser.uid);
+      updateDoc(metricsRef, {
+        hostRating: averageRating,
+        averageRating: averageRating,
+        lastUpdated: new Date().toISOString()
+      }).catch(err => console.error("Error updating host rating:", err));
+    }
 
     // Calculate response rate (based on bookings)
     const totalRequests = bookings.length;
@@ -791,6 +1179,7 @@ useEffect(() => {
       upcoming: upcomingBookings,
       occupancyRate: occupancyRate,
       averageRating: averageRating,
+      hostRating: averageRating, // Update host rating in local state
       responseRate: responseRate,
       responseTime: responseRate >= 90 ? '<1hr' : '<2hrs'
     }));
@@ -807,14 +1196,228 @@ useEffect(() => {
     try {
       await approveBookingTransaction(db, booking.id);
       
-      // Add earnings to wallet when booking is approved (95% after 5% admin commission)
+      // Get dynamic service fee from admin config
+      let serviceFeePercent = 5; // Default to 5%
+      try {
+        const configRef = doc(db, "adminSettings", "config");
+        const configSnap = await getDoc(configRef);
+        if (configSnap.exists()) {
+          const cfg = configSnap.data();
+          const parsedFee = Number(cfg.serviceFee);
+          if (!Number.isNaN(parsedFee) && parsedFee >= 0 && parsedFee <= 100) {
+            serviceFeePercent = parsedFee;
+          }
+        }
+      } catch (configError) {
+        console.warn("Failed to load admin service fee; using default 5%", configError);
+      }
+      
+      // Add earnings to wallet when booking is approved (dynamic percentage)
       const totalAmount = booking.total || booking.price || 0;
-      const hostEarnings = totalAmount * 0.95; // 95% for host, 5% goes to admin
+      const adminCommission = totalAmount * (serviceFeePercent / 100);
+      const hostEarnings = totalAmount - adminCommission;
+      const hostPercentage = 100 - serviceFeePercent;
+      
       addEarningsToWallet(
         hostEarnings,
-        `Booking: ${booking.title} - ${booking.guestName || 'Guest'} (95% after 5% admin fee)`,
+        `Booking: ${booking.title} - ${booking.guestName || 'Guest'} (${hostPercentage}% after ${serviceFeePercent}% admin fee)`,
         booking.id
       );
+
+      // Award points for approved booking (50 points per booking)
+      try {
+        const pointsToAward = 50;
+        const metricsRef = doc(db, "dashboardMetrics", auth.currentUser.uid);
+        const metricsSnap = await getDoc(metricsRef);
+        
+        if (metricsSnap.exists()) {
+          const currentData = metricsSnap.data();
+          const currentPoints = currentData.points || 0;
+          const totalPointsEarned = currentData.totalPointsEarned || 0;
+          
+          await updateDoc(metricsRef, {
+            points: increment(pointsToAward),
+            totalPointsEarned: increment(pointsToAward),
+            lastUpdated: new Date().toISOString()
+          });
+          
+          console.log(`✅ Awarded ${pointsToAward} points for approved booking. New total: ${currentPoints + pointsToAward}`);
+        } else {
+          // Initialize metrics if doesn't exist
+          await initializeDashboardMetrics(auth.currentUser.uid);
+          await updateDoc(metricsRef, {
+            points: pointsToAward,
+            totalPointsEarned: pointsToAward,
+            lastUpdated: new Date().toISOString()
+          });
+        }
+      } catch (pointsError) {
+        console.error("Error awarding points:", pointsError);
+        // Don't block booking approval if points fail
+      }
+      
+      // Send booking confirmation email to guest
+      try {
+        console.log("📧 Attempting to send booking confirmation email...");
+        console.log("📋 Booking object:", booking);
+        console.log("📋 Booking fields:", {
+          id: booking.id,
+          guestId: booking.guestId,
+          guestEmail: booking.guestEmail,
+          guestName: booking.guestName,
+          guest: booking.guest,
+          email: booking.email
+        });
+        
+        const bookingTotal = booking.total || booking.price || 0;
+        const serviceFee = bookingTotal * (serviceFeePercent / 100); // Dynamic service fee
+        const subtotal = bookingTotal - serviceFee;
+        
+        // Get guest email from users collection if not in booking object
+        let guestEmail = booking.guestEmail || booking.email || booking.guest?.email;
+        let guestName = booking.guestName || booking.guest?.name || booking.guestName;
+        
+        // Try to get from Firebase Auth if we have guestId
+        if (!guestEmail && booking.guestId) {
+          console.log("🔍 Fetching guest email from users collection for guestId:", booking.guestId);
+          try {
+            const guestDoc = await getDoc(doc(db, "users", booking.guestId));
+            if (guestDoc.exists()) {
+              const guestData = guestDoc.data();
+              console.log("✅ Found guest data:", guestData);
+              guestEmail = guestData.email || guestEmail;
+              guestName = guestData.name || guestName;
+            } else {
+              console.warn("⚠️ Guest document not found in users collection for guestId:", booking.guestId);
+            }
+          } catch (guestError) {
+            console.error("❌ Error fetching guest data:", guestError);
+          }
+        }
+
+        console.log("📧 Final guest email:", guestEmail);
+        console.log("👤 Final guest name:", guestName);
+
+        if (!guestEmail || guestEmail.trim() === "") {
+          console.warn("❌ Cannot send booking confirmation email: No guest email found for booking", booking.id);
+          console.warn("📋 Available booking fields:", Object.keys(booking));
+          alert("Booking approved! Note: Could not send confirmation email - guest email not found in booking data.");
+        } else {
+          console.log("Preparing to send booking confirmation email to:", guestEmail);
+          console.log("Booking details:", {
+            id: booking.id,
+            title: booking.title,
+            total: bookingTotal
+          });
+
+        const emailHtml = buildBookingConfirmationTemplate({
+          guestName: guestName || guestEmail?.split('@')[0] || "Guest",
+          bookingId: booking.id,
+          listingTitle: booking.title || "Your Booking",
+          listingImage: booking.image || booking.listingImage || "https://images.unsplash.com/photo-1505691924083-fb6d2ee58f58?q=80&w=1200&auto=format&fit=crop",
+          checkIn: booking.checkIn,
+          checkOut: booking.checkOut,
+          guests: booking.guests || booking.numberOfGuests || 1,
+          location: booking.location || "",
+          totalAmount: bookingTotal,
+          serviceFee: serviceFee,
+          subtotal: subtotal,
+          guestEmail: guestEmail,
+          supportEmail: EMAILJS_BOOKING_CONFIG.SUPPORT_EMAIL,
+          brandName: EMAILJS_BOOKING_CONFIG.BRAND_NAME,
+          appUrl: EMAILJS_BOOKING_CONFIG.APP_URL || window.location.origin
+        });
+
+        // Validate email before creating template params
+        if (!guestEmail || guestEmail.trim() === "" || !guestEmail.includes("@")) {
+          throw new Error(`Invalid guest email: "${guestEmail}". Cannot send confirmation email.`);
+        }
+
+        const templateParams = {
+          to_email: guestEmail.trim(),
+          email: guestEmail.trim(),
+          customer_name: guestName || guestEmail?.split('@')[0] || "Guest",
+          guest_name: guestName || guestEmail?.split('@')[0] || "Guest",
+          booking_id: booking.id,
+          booking_reference: booking.id,
+          service_name: booking.title || "Your Booking",
+          listing_title: booking.title || "Your Booking",
+          booking_date: booking.checkIn ? (typeof booking.checkIn === "string" ? booking.checkIn : new Date(booking.checkIn).toLocaleDateString('en-US', { 
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+          })) : "TBD",
+          date: booking.checkIn ? (typeof booking.checkIn === "string" ? booking.checkIn : new Date(booking.checkIn).toLocaleDateString('en-US', { 
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+          })) : "TBD",
+          check_in: booking.checkIn ? (typeof booking.checkIn === "string" ? booking.checkIn : new Date(booking.checkIn).toLocaleDateString('en-US', { 
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+          })) : "TBD",
+          check_out: booking.checkOut ? (typeof booking.checkOut === "string" ? booking.checkOut : new Date(booking.checkOut).toLocaleDateString('en-US', { 
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+          })) : "TBD",
+          booking_time: "", // Not applicable for stay bookings
+          guests: booking.guests || booking.numberOfGuests || 1,
+          location: booking.location || "",
+          total_amount: `₱${bookingTotal.toLocaleString()}`,
+          message_html: emailHtml
+        };
+
+        console.log("📧 Template params to_email:", templateParams.to_email);
+        console.log("📧 Template params email:", templateParams.email);
+
+          console.log("Sending email with EmailJS (Booking Config)...");
+          console.log("Template ID:", EMAILJS_BOOKING_CONFIG.TEMPLATE_ID);
+          console.log("Service ID:", EMAILJS_BOOKING_CONFIG.SERVICE_ID);
+          console.log("Public Key:", EMAILJS_BOOKING_CONFIG.PUBLIC_KEY);
+          console.log("Template Params:", templateParams);
+          
+          // Validate required fields
+          if (!guestEmail || !EMAILJS_BOOKING_CONFIG.SERVICE_ID || !EMAILJS_BOOKING_CONFIG.TEMPLATE_ID) {
+            throw new Error(`Missing required fields: guestEmail=${!!guestEmail}, serviceId=${!!EMAILJS_BOOKING_CONFIG.SERVICE_ID}, templateId=${!!EMAILJS_BOOKING_CONFIG.TEMPLATE_ID}`);
+          }
+          
+          const emailResult = await emailjs.send(
+            EMAILJS_BOOKING_CONFIG.SERVICE_ID,
+            EMAILJS_BOOKING_CONFIG.TEMPLATE_ID,
+            templateParams
+          );
+
+          console.log('✅ Booking confirmation email sent successfully to', guestEmail);
+          console.log('EmailJS Response:', emailResult);
+        }
+      } catch (emailError) {
+        console.error("❌ Error sending booking confirmation email:", emailError);
+        console.error("Full error object:", emailError);
+        console.error("Error details:", {
+          message: emailError.message,
+          text: emailError.text,
+          status: emailError.status,
+          response: emailError.response
+        });
+        
+        // Get more detailed error message
+        let errorMessage = 'Unknown error';
+        if (emailError.text) {
+          errorMessage = emailError.text;
+        } else if (emailError.message) {
+          errorMessage = emailError.message;
+        } else if (emailError.response?.text) {
+          errorMessage = emailError.response.text;
+        }
+        
+        alert(`Booking approved! Warning: Failed to send confirmation email.\n\nError: ${errorMessage}\n\nPlease check the browser console for more details.`);
+      }
       
       // Count guest's total APPROVED bookings from Firestore for accuracy
       try {
@@ -851,11 +1454,170 @@ useEffect(() => {
 
   const handleDeclineBooking = async (booking) => {
     try {
+      // Process 100% refund to guest
+      const totalPaid = booking.total || booking.price || 0;
+      const refundAmount = totalPaid; // 100% refund
+
+      // Get guest's current PayPal balance from Firestore
+      let guestPayPalBalance = 0;
+      if (booking.guestId) {
+        try {
+          const guestDoc = await getDoc(doc(db, "users", booking.guestId));
+          if (guestDoc.exists()) {
+            const guestData = guestDoc.data();
+            guestPayPalBalance = parseFloat(guestData.paypalBalance || 0);
+          }
+        } catch (guestError) {
+          console.error("Error fetching guest PayPal balance:", guestError);
+        }
+      }
+
+      // Calculate new balance (using PHP)
+      const newGuestBalance = guestPayPalBalance + refundAmount;
+
+      // Update guest's PayPal balance in Firestore
+      if (booking.guestId) {
+        try {
+          await updateDoc(doc(db, "users", booking.guestId), {
+            paypalBalance: newGuestBalance,
+            updatedAt: serverTimestamp()
+          });
+          console.log(`✅ Guest PayPal balance updated: ₱${newGuestBalance.toLocaleString()} PHP`);
+        } catch (balanceError) {
+          console.error("Error updating guest PayPal balance:", balanceError);
+        }
+      }
+
+      // Save refund transaction to transactions collection
+      if (booking.guestId) {
+        try {
+          await addDoc(collection(db, "transactions"), {
+            userId: booking.guestId,
+            type: 'Refund',
+            amount: refundAmount,
+            currency: 'PHP',
+            transactionId: `REFUND-DECLINED-${booking.id}`,
+            balanceBefore: guestPayPalBalance,
+            balanceAfter: newGuestBalance,
+            status: 'Completed',
+            description: `100% Refund for declined booking: ${booking.title || 'Booking'}`,
+            listingTitle: booking.title || '',
+            checkIn: booking.checkIn,
+            checkOut: booking.checkOut,
+            originalBookingId: booking.id,
+            timestamp: serverTimestamp(),
+            createdAt: new Date().toISOString()
+          });
+          console.log("✅ Refund transaction saved");
+        } catch (transactionError) {
+          console.error("Error saving refund transaction:", transactionError);
+        }
+      }
+
+      // Update booking status with refund information
       await updateDoc(doc(db, "bookings", booking.id), {
         status: "Declined",
-        updatedAt: new Date().toISOString()
+        declinedAt: serverTimestamp(),
+        refundAmount: refundAmount,
+        refundPercentage: 100,
+        updatedAt: serverTimestamp()
       });
-      alert("Booking declined");
+
+      // Send booking declined email to guest
+      try {
+        console.log("📧 Attempting to send booking declined email...");
+        
+        // Get guest email
+        let guestEmail = booking.guestEmail;
+        let guestName = booking.guestName;
+        
+        if (!guestEmail && booking.guestId) {
+          try {
+            const guestDoc = await getDoc(doc(db, "users", booking.guestId));
+            if (guestDoc.exists()) {
+              const guestData = guestDoc.data();
+              guestEmail = guestData.email || guestEmail;
+              guestName = guestData.name || guestName;
+            }
+          } catch (guestError) {
+            console.error("Error fetching guest data:", guestError);
+          }
+        }
+
+        if (!guestEmail || guestEmail.trim() === "" || !guestEmail.includes("@")) {
+          console.warn("❌ Cannot send declined email: No valid guest email found");
+        } else {
+          // Initialize EmailJS if not already initialized
+          emailjs.init(EMAILJS_DECLINED_CONFIG.PUBLIC_KEY);
+
+          const emailHtml = buildBookingDeclinedTemplate({
+            guestName: guestName || guestEmail?.split('@')[0] || "Valued Guest",
+            bookingId: booking.id,
+            listingTitle: booking.title || "Your Booking",
+            checkIn: booking.checkIn,
+            checkOut: booking.checkOut,
+            guests: booking.guests || booking.numberOfGuests || 1,
+            location: booking.location || "",
+            guestEmail: guestEmail,
+            supportEmail: EMAILJS_DECLINED_CONFIG.SUPPORT_EMAIL,
+            brandName: EMAILJS_DECLINED_CONFIG.BRAND_NAME,
+            appUrl: EMAILJS_DECLINED_CONFIG.APP_URL || window.location.origin
+          });
+
+          const templateParams = {
+            to_email: guestEmail.trim(),
+            email: guestEmail.trim(),
+            customer_name: guestName || guestEmail?.split('@')[0] || "Valued Guest",
+            guest_name: guestName || guestEmail?.split('@')[0] || "Valued Guest",
+            booking_id: booking.id,
+            booking_reference: booking.id,
+            service_name: booking.title || "Your Booking",
+            listing_title: booking.title || "Your Booking",
+            check_in: booking.checkIn ? (typeof booking.checkIn === "string" ? booking.checkIn : new Date(booking.checkIn).toLocaleDateString('en-US', { 
+              weekday: 'long',
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            })) : "TBD",
+            check_out: booking.checkOut ? (typeof booking.checkOut === "string" ? booking.checkOut : new Date(booking.checkOut).toLocaleDateString('en-US', { 
+              weekday: 'long',
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            })) : "TBD",
+            guests: booking.guests || booking.numberOfGuests || 1,
+            location: booking.location || "",
+            message_html: emailHtml
+          };
+
+          console.log("Sending declined booking email with EmailJS...");
+          console.log("Template ID:", EMAILJS_DECLINED_CONFIG.TEMPLATE_ID);
+          console.log("Service ID:", EMAILJS_DECLINED_CONFIG.SERVICE_ID);
+          
+          if (!EMAILJS_DECLINED_CONFIG.SERVICE_ID || !EMAILJS_DECLINED_CONFIG.TEMPLATE_ID) {
+            throw new Error(`Missing EmailJS config: serviceId=${!!EMAILJS_DECLINED_CONFIG.SERVICE_ID}, templateId=${!!EMAILJS_DECLINED_CONFIG.TEMPLATE_ID}`);
+          }
+          
+          const emailResult = await emailjs.send(
+            EMAILJS_DECLINED_CONFIG.SERVICE_ID,
+            EMAILJS_DECLINED_CONFIG.TEMPLATE_ID,
+            templateParams
+          );
+
+          console.log('✅ Booking declined email sent successfully to', guestEmail);
+          console.log('EmailJS Response:', emailResult);
+        }
+      } catch (emailError) {
+        console.error("❌ Error sending booking declined email:", emailError);
+        console.error("Error details:", {
+          message: emailError.message,
+          text: emailError.text,
+          status: emailError.status
+        });
+        // Don't show error to user - decline was successful, email is just a bonus
+      }
+
+      alert(`Booking declined successfully!\n\n100% refund processed:\n- Refund Amount: ₱${refundAmount.toLocaleString()} PHP\n- Guest's new balance: ₱${newGuestBalance.toLocaleString()} PHP`);
     } catch (e) {
       console.error("Decline booking failed:", e);
       alert("Failed to decline booking. Please try again.");
@@ -943,29 +1705,146 @@ useEffect(() => {
     setShowRewardsModal(true);
   };
 
-  // Wallet Management Functions
-  const addEarningsToWallet = (amount, description, bookingId) => {
-    const transaction = {
-      id: `TXN-${Date.now()}`,
-      type: 'earning',
-      amount: amount,
-      description: description,
-      bookingId: bookingId,
-      date: new Date().toISOString(),
-      status: 'completed'
-    };
+  // Redeem points for cash
+  const handleRedeemPoints = async () => {
+    const pointsToRedeem = parseInt(redeemPointsAmount);
     
-    setTransactions(prev => [transaction, ...prev]);
-    setWalletBalance(prev => prev + amount);
+    if (!pointsToRedeem || pointsToRedeem <= 0) {
+      alert('Please enter a valid number of points to redeem');
+      return;
+    }
     
-    // Update total earnings in dashboard
-    setDashboard(prev => ({
-      ...prev,
-      totalEarnings: prev.totalEarnings + amount
-    }));
+    if (pointsToRedeem > hostPoints) {
+      alert(`Insufficient points. You have ${hostPoints.toLocaleString()} points.`);
+      return;
+    }
+
+    // Redemption rate: 100 points = ₱10 (or 10 points = ₱1)
+    const POINTS_TO_PESO_RATE = 10; // 10 points = ₱1
+    const cashAmount = pointsToRedeem / POINTS_TO_PESO_RATE;
+    
+    try {
+      const userId = auth.currentUser?.uid;
+      if (!userId) {
+        alert('User not authenticated');
+        return;
+      }
+
+      // Update points in dashboard metrics
+      const metricsRef = doc(db, "dashboardMetrics", userId);
+      const metricsSnap = await getDoc(metricsRef);
+      
+      if (!metricsSnap.exists()) {
+        await initializeDashboardMetrics(userId);
+      }
+      
+      const currentData = metricsSnap.exists() ? metricsSnap.data() : {};
+      const currentPoints = currentData.points || 0;
+      const currentPointsRedeemed = currentData.pointsRedeemed || 0;
+      
+      if (pointsToRedeem > currentPoints) {
+        alert(`Insufficient points. You have ${currentPoints.toLocaleString()} points.`);
+        return;
+      }
+
+      // Deduct points and update redeemed amount
+      await updateDoc(metricsRef, {
+        points: increment(-pointsToRedeem),
+        pointsRedeemed: increment(pointsToRedeem),
+        lastUpdated: new Date().toISOString()
+      });
+
+      // Add cash to wallet (this will also update totalEarnings in dashboardMetrics)
+      await addEarningsToWallet(
+        cashAmount,
+        `Points Redemption: ${pointsToRedeem.toLocaleString()} points converted to cash`,
+        null
+      );
+
+      // Create transaction record for points redemption
+      const transactionsRef = collection(db, "transactions");
+      await addDoc(transactionsRef, {
+        userId: userId,
+        type: 'points-redemption',
+        amount: cashAmount,
+        points: pointsToRedeem,
+        description: `Redeemed ${pointsToRedeem.toLocaleString()} points for ₱${cashAmount.toLocaleString()}`,
+        date: serverTimestamp(),
+        createdAt: new Date().toISOString(),
+        status: 'completed'
+      });
+
+      alert(`✅ Successfully redeemed ${pointsToRedeem.toLocaleString()} points for ₱${cashAmount.toLocaleString()}!\n\nPoints have been added to your wallet balance.`);
+      
+      setRedeemPointsAmount('');
+      setShowRedeemPointsModal(false);
+    } catch (error) {
+      console.error('Error redeeming points:', error);
+      alert(`Failed to redeem points: ${error.message}. Please try again.`);
+    }
   };
 
-  const handleWithdraw = () => {
+  // Wallet Management Functions
+  const addEarningsToWallet = async (amount, description, bookingId) => {
+    const userId = auth.currentUser?.uid;
+    if (!userId) return;
+    
+    try {
+      // Save transaction to Firestore
+      const transactionsRef = collection(db, "transactions");
+      const newTransaction = {
+        userId: userId,
+        type: 'earning',
+        amount: amount,
+        description: description,
+        bookingId: bookingId,
+        date: serverTimestamp(),
+        createdAt: new Date().toISOString(),
+        status: 'completed'
+      };
+      
+      await addDoc(transactionsRef, newTransaction);
+      console.log('Earning transaction saved to Firestore');
+      
+      // Update total earnings in dashboardMetrics (Firestore)
+      // The real-time listener will automatically update local state
+      const metricsRef = doc(db, "dashboardMetrics", userId);
+      const metricsSnap = await getDoc(metricsRef);
+      
+      if (metricsSnap.exists()) {
+        await updateDoc(metricsRef, {
+          totalEarnings: increment(amount),
+          lastUpdated: new Date().toISOString()
+        });
+      } else {
+        // Initialize if doesn't exist
+        await initializeDashboardMetrics(userId);
+        await updateDoc(metricsRef, {
+          totalEarnings: amount,
+          lastUpdated: new Date().toISOString()
+        });
+      }
+      
+      // Don't update local state here - let the real-time listener handle it
+      // This prevents double counting
+    } catch (error) {
+      console.error('Error saving earning transaction:', error);
+      // Still update local state even if Firestore save fails
+      const transaction = {
+        id: `TXN-${Date.now()}`,
+        type: 'earning',
+        amount: amount,
+        description: description,
+        bookingId: bookingId,
+        date: new Date().toISOString(),
+        status: 'completed'
+      };
+      setTransactions(prev => [transaction, ...prev]);
+      setWalletBalance(prev => prev + amount);
+    }
+  };
+
+  const handleWithdraw = async () => {
     const amount = parseFloat(withdrawAmount);
     
     if (!amount || amount <= 0) {
@@ -977,23 +1856,44 @@ useEffect(() => {
       alert('Insufficient balance');
       return;
     }
+
+    // Validate PayPal email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!paypalEmail || !emailRegex.test(paypalEmail.trim())) {
+      alert('Please enter a valid PayPal email address');
+      return;
+    }
     
-    const transaction = {
-      id: `TXN-${Date.now()}`,
-      type: 'withdrawal',
-      amount: amount,
-      description: `Withdrawal to ${withdrawMethod}`,
-      method: withdrawMethod,
-      date: new Date().toISOString(),
-      status: 'processing'
-    };
+    // In PayPal Sandbox, any valid email format is accepted
+    // The email should be associated with a PayPal Sandbox account
     
-    setTransactions(prev => [transaction, ...prev]);
-    setWalletBalance(prev => prev - amount);
-    setWithdrawAmount('');
-    setShowWithdrawModal(false);
-    
-    alert(`Withdrawal of ₱${amount.toLocaleString()} to ${withdrawMethod} is being processed.`);
+    try {
+      // Create withdrawal request for PayPal email only
+      const withdrawalRequest = {
+        hostId: auth.currentUser.uid,
+        hostName: profile.name || auth.currentUser.email?.split('@')[0] || 'Host',
+        amount: amount,
+        method: 'PayPal',
+        paypalEmail: paypalEmail.trim(),
+        status: 'pending', // pending, approved, rejected
+        requestedAt: serverTimestamp(),
+        createdAt: new Date().toISOString(),
+        description: `Withdrawal request to PayPal: ${paypalEmail.trim()}`
+      };
+      
+      // Save withdrawal request to Firestore
+      const withdrawalRequestsRef = collection(db, "withdrawalRequests");
+      await addDoc(withdrawalRequestsRef, withdrawalRequest);
+      
+      setWithdrawAmount('');
+      setPaypalEmail('');
+      setShowWithdrawModal(false);
+      
+      alert(`Withdrawal request submitted successfully!\n\nAmount: ₱${amount.toLocaleString()} PHP\nPayPal Email: ${paypalEmail.trim()}\n\nYour withdrawal request is now pending admin approval. You will be notified once it's processed.`);
+    } catch (error) {
+      console.error('Error creating withdrawal request:', error);
+      alert(`Failed to submit withdrawal request.\n\nError: ${error.message || 'Unknown error'}\n\nPlease try again or contact support if the problem persists.`);
+    }
   };
 
   const getTransactionIcon = (type) => {
@@ -1284,25 +2184,33 @@ useEffect(() => {
   }, [coupons, couponsLoaded]);
 
   return (
-<div className="min-h-screen bg-gradient-to-br from-yellow-50 via-amber-50 to-white py-10 px-2 overflow-x-hidden">
+<div className="min-h-screen bg-gradient-to-br from-yellow-50 via-amber-50 to-white py-4 md:py-10 px-3 md:px-4 lg:px-2 overflow-x-hidden">
       <div className="max-w-6xl mx-auto relative">
         {/* Airbnb-style Header */}
-        <div className="bg-white shadow-sm rounded-lg p-6 mb-8">
-          <div className="flex items-center justify-between">
+        <div className="bg-white shadow-sm rounded-lg p-4 md:p-6 mb-6 md:mb-8">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             {/* Logo and Navigation */}
-            <div className="flex items-center gap-8">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-8">
           <div className="flex items-center gap-3">
-                <div className="w-12 h-12 bg-yellow-400 rounded-full flex items-center justify-center">
-                  <span className="text-white font-bold text-xl">H</span>
+                <div className="w-10 h-10 md:w-12 md:h-12 bg-yellow-400 rounded-full flex items-center justify-center flex-shrink-0">
+                  <span className="text-white font-bold text-lg md:text-xl">H</span>
                 </div>
             <div>
-                  <h1 className="text-2xl font-bold text-gray-900">Host Dashboard</h1>
-                  <p className="text-sm text-gray-500">Welcome back, {profile.name}</p>
+                  <h1 className="text-xl md:text-2xl font-bold text-gray-900">Host Dashboard</h1>
+                  <p className="text-xs md:text-sm text-gray-500">Welcome back, {profile.name}</p>
             </div>
           </div>
               
+              {/* Mobile Menu Button */}
+              <button
+                onClick={() => setShowMobileMenu(!showMobileMenu)}
+                className="lg:hidden p-2 rounded-lg hover:bg-gray-100 transition"
+              >
+                <FaBars className="text-gray-600 text-xl" />
+              </button>
+
               {/* Navigation Tabs */}
-              <div className="hidden lg:flex items-center gap-6">
+              <div className="hidden lg:flex items-center gap-4 lg:gap-6">
                 <button 
                   onClick={() => setActiveTab("overview")}
                   className={`py-2 px-3 rounded-lg font-medium text-sm transition ${
@@ -1356,27 +2264,85 @@ useEffect(() => {
             </div>
           </div>
 
+          {/* Mobile Navigation Menu */}
+          {showMobileMenu && (
+            <div className="lg:hidden mt-4 pt-4 border-t border-gray-200">
+              <div className="flex flex-col gap-2">
+                <button 
+                  onClick={() => { setActiveTab("overview"); setShowMobileMenu(false); }}
+                  className={`py-2 px-3 rounded-lg font-medium text-sm transition text-left ${
+                    activeTab === "overview" 
+                      ? "bg-yellow-100 text-yellow-700" 
+                      : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+                  }`}
+                >
+                  Overview
+                </button>
+                <button 
+                  onClick={() => { setActiveTab("listings"); setShowMobileMenu(false); }}
+                  className={`py-2 px-3 rounded-lg font-medium text-sm transition text-left ${
+                    activeTab === "listings" 
+                      ? "bg-yellow-100 text-yellow-700" 
+                      : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+                  }`}
+                >
+                  Listings
+                </button>
+                <button 
+                  onClick={() => { setActiveTab("calendar"); setShowMobileMenu(false); }}
+                  className={`py-2 px-3 rounded-lg font-medium text-sm transition text-left ${
+                    activeTab === "calendar" 
+                      ? "bg-yellow-100 text-yellow-700" 
+                      : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+                  }`}
+                >
+                  Calendar
+                </button>
+                <button 
+                  onClick={() => { handleOpenChatList(); setShowMobileMenu(false); }}
+                  className={`py-2 px-3 rounded-lg font-medium text-sm transition text-left ${
+                    activeTab === "messages" 
+                      ? "bg-yellow-100 text-yellow-700" 
+                      : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+                  }`}
+                >
+                  Messages
+                </button>
+                <button 
+                  onClick={() => { setActiveTab("earnings"); setShowMobileMenu(false); }}
+                  className={`py-2 px-3 rounded-lg font-medium text-sm transition text-left ${
+                    activeTab === "earnings" 
+                      ? "bg-yellow-100 text-yellow-700" 
+                      : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+                  }`}
+                >
+                  Earnings
+                </button>
+              </div>
+            </div>
+          )}
+
             {/* User Profile and Actions */}
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 md:gap-4">
               <button 
                 onClick={() => setShowNotifications(!showNotifications)}
                 className="relative p-2 rounded-full hover:bg-gray-100 transition"
               >
-                <FaBell className="text-gray-600" />
+                <FaBell className="text-gray-600 text-lg md:text-xl" />
                 {pendingApprovals.length > 0 && (
-                  <span className="absolute -top-1 -right-1 min-w-[20px] h-5 bg-red-500 text-white text-xs rounded-full flex items-center justify-center px-1">
+                  <span className="absolute -top-1 -right-1 min-w-[18px] h-4 md:min-w-[20px] md:h-5 bg-red-500 text-white text-[10px] md:text-xs rounded-full flex items-center justify-center px-1">
                     {pendingApprovals.length}
                   </span>
                 )}
               </button>
               <button onClick={() => setShowAccountSettings(true)} className="p-2 rounded-full hover:bg-gray-100 transition">
-                <FaSettings className="text-gray-600" />
+                <FaSettings className="text-gray-600 text-lg md:text-xl" />
               </button>
-              <div className="flex items-center gap-3 bg-gray-50 rounded-full px-4 py-2">
+              <div className="flex items-center gap-2 md:gap-3 bg-gray-50 rounded-full px-2 md:px-4 py-1.5 md:py-2">
                 <img 
                   src={profile.avatar || "https://images.unsplash.com/photo-1494790108755-2616b612b786?q=80&w=100&auto=format&fit=crop"}
                   alt="Profile"
-                  className="w-8 h-8 rounded-full"
+                  className="w-7 h-7 md:w-8 md:h-8 rounded-full flex-shrink-0"
                 />
                 <div className="hidden sm:block">
                   <div className="flex items-center gap-2">
@@ -1412,22 +2378,38 @@ useEffect(() => {
                 </div>
                 <div className="space-y-3">
                   {pendingApprovals.slice(0,5).map((b) => (
-                    <div key={b.id} className="flex items-center justify-between p-3 bg-yellow-50 rounded-lg">
-                      <div>
-                        <div className="font-medium">{b.title}</div>
-                        <div className="text-xs text-gray-600">{b.checkIn} → {b.checkOut} • ₱{(b.total||0).toLocaleString()}</div>
+                    <div key={b.id} className="bg-yellow-50 rounded-lg border border-yellow-200 overflow-hidden">
+                      <div className="flex items-start justify-between p-3">
+                        <div className="flex-1">
+                          <div className="font-medium text-gray-900">{b.title}</div>
+                          <div className="text-xs text-gray-600 mt-1">{b.checkIn} → {b.checkOut} • ₱{(b.total||0).toLocaleString()}</div>
+                          {b.guestName && (
+                            <div className="text-xs text-gray-500 mt-1">Guest: {b.guestName}</div>
+                          )}
+                        </div>
+                        <div className="flex gap-2 ml-3">
+                          <button onClick={() => handleDeclineBooking(b)} className="px-3 py-1 rounded bg-red-100 text-red-700 text-sm hover:bg-red-200 whitespace-nowrap">Decline</button>
+                          <button onClick={() => handleApproveBooking(b)} className="px-3 py-1 rounded bg-green-600 text-white text-sm hover:bg-green-700 whitespace-nowrap">Approve</button>
+                        </div>
                       </div>
-                      <div className="flex gap-2">
-                        <button onClick={() => handleDeclineBooking(b)} className="px-3 py-1 rounded bg-red-100 text-red-700 text-sm hover:bg-red-200">Decline</button>
-                        <button onClick={() => handleApproveBooking(b)} className="px-3 py-1 rounded bg-green-600 text-white text-sm hover:bg-green-700">Approve</button>
-                      </div>
+                      {b.notes && b.notes.trim() && (
+                        <div className="px-3 pb-3 pt-2 bg-blue-50 border-t border-blue-200">
+                          <div className="flex items-start gap-2">
+                            <FaComments className="text-blue-600 text-sm mt-0.5 flex-shrink-0" />
+                            <div className="flex-1">
+                              <div className="text-xs font-semibold text-blue-800 mb-1">Special Requests from Guest:</div>
+                              <div className="text-sm text-gray-800 whitespace-pre-wrap bg-white rounded p-2 border border-blue-200">{b.notes}</div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
               </div>
             )}
             {/* Key Metrics */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 md:gap-6">
               <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-green-500">
                 <div className="flex items-center justify-between">
                   <div>
@@ -1483,7 +2465,191 @@ useEffect(() => {
                   <FaComments className="text-3xl text-pink-500" />
             </div>
           </div>
+
+              <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-purple-500">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">Host Points</p>
+                    <p className="text-2xl font-bold text-gray-900">{hostPoints.toLocaleString()}</p>
+                    <p className="text-xs text-purple-600 mt-1">50 pts per booking</p>
+                  </div>
+                  <FaGift className="text-3xl text-purple-500" />
+                </div>
+          </div>
         </div>
+
+            {/* Today's Bookings and Upcoming Bookings */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Today's Bookings */}
+              <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-green-500">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    <FaCalendarCheck className="text-green-500" />
+                    Today's Bookings
+                  </h3>
+                  <span className="text-sm font-semibold text-green-600 bg-green-100 px-3 py-1 rounded-full">
+                    {(() => {
+                      const now = new Date();
+                      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                      const tomorrow = new Date(today);
+                      tomorrow.setDate(tomorrow.getDate() + 1);
+                      return bookings.filter(b => {
+                        if (!b.checkIn || b.status === 'Cancelled' || b.status === 'CancelledByGuest') return false;
+                        const checkInDate = b.checkIn?.toDate ? b.checkIn.toDate() : new Date(b.checkIn);
+                        return checkInDate >= today && checkInDate < tomorrow;
+                      }).length;
+                    })()}
+                  </span>
+                </div>
+                <div className="space-y-3 max-h-96 overflow-y-auto">
+                  {(() => {
+                    const now = new Date();
+                    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                    const tomorrow = new Date(today);
+                    tomorrow.setDate(tomorrow.getDate() + 1);
+                    const todayBookingsList = bookings.filter(b => {
+                      if (!b.checkIn || b.status === 'Cancelled' || b.status === 'CancelledByGuest') return false;
+                      const checkInDate = b.checkIn?.toDate ? b.checkIn.toDate() : new Date(b.checkIn);
+                      return checkInDate >= today && checkInDate < tomorrow;
+                    }).sort((a, b) => {
+                      const dateA = a.checkIn?.toDate ? a.checkIn.toDate() : new Date(a.checkIn);
+                      const dateB = b.checkIn?.toDate ? b.checkIn.toDate() : new Date(b.checkIn);
+                      return dateA - dateB;
+                    });
+
+                    if (todayBookingsList.length > 0) {
+                      return todayBookingsList.map((booking) => (
+                        <div key={booking.id} className="flex items-center justify-between p-3 bg-green-50 rounded-lg border border-green-100">
+                          <div className="flex-1">
+                            <div className="font-medium text-sm text-gray-900">{booking.title || "Booking"}</div>
+                            <div className="text-xs text-gray-600 mt-1">
+                              {booking.guestName && booking.guestName !== 'Guest User' ? booking.guestName : 
+                               booking.guestEmail ? booking.guestEmail.split('@')[0] : 'Guest'}
+                            </div>
+                            <div className="text-xs text-gray-500 mt-1">
+                              Check-in: {booking.checkIn ? (new Date(booking.checkIn?.toDate ? booking.checkIn.toDate() : booking.checkIn).toLocaleDateString('en-US', { 
+                                month: 'short', 
+                                day: 'numeric',
+                                hour: '2-digit',
+                                minute: '2-digit'
+                              })) : 'TBD'}
+                            </div>
+                            {booking.checkOut && (
+                              <div className="text-xs text-gray-500">
+                                Check-out: {new Date(booking.checkOut?.toDate ? booking.checkOut.toDate() : booking.checkOut).toLocaleDateString('en-US', { 
+                                  month: 'short', 
+                                  day: 'numeric'
+                                })}
+                              </div>
+                            )}
+                          </div>
+                          <div className="text-right ml-3">
+                            <p className="font-semibold text-sm text-green-700">₱{(booking.total || 0).toLocaleString()}</p>
+                            <span className={`text-xs px-2 py-1 rounded-full ${
+                              booking.status === 'Upcoming' ? 'bg-blue-100 text-blue-700' :
+                              booking.status === 'Completed' ? 'bg-gray-100 text-gray-700' :
+                              'bg-yellow-100 text-yellow-700'
+                            }`}>
+                              {booking.status || 'Pending'}
+                            </span>
+                          </div>
+                        </div>
+                      ));
+                    } else {
+                      return (
+                        <div className="text-center py-6 text-gray-500">
+                          <FaCalendarAlt className="text-3xl mx-auto mb-2 text-gray-300" />
+                          <p className="text-sm">No check-ins today</p>
+                        </div>
+                      );
+                    }
+                  })()}
+                </div>
+              </div>
+
+              {/* Upcoming Bookings */}
+              <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-blue-500">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    <FaClock className="text-blue-500" />
+                    Upcoming Bookings
+                  </h3>
+                  <span className="text-sm font-semibold text-blue-600 bg-blue-100 px-3 py-1 rounded-full">
+                    {(() => {
+                      const now = new Date();
+                      const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+                      return bookings.filter(b => {
+                        if (!b.checkIn || b.status === 'Cancelled' || b.status === 'CancelledByGuest') return false;
+                        const checkInDate = b.checkIn?.toDate ? b.checkIn.toDate() : new Date(b.checkIn);
+                        return checkInDate >= tomorrow && (b.status === 'Upcoming' || b.status === 'PendingApproval');
+                      }).length;
+                    })()}
+                  </span>
+                </div>
+                <div className="space-y-3 max-h-96 overflow-y-auto">
+                  {(() => {
+                    const now = new Date();
+                    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+                    const upcomingBookingsList = bookings.filter(b => {
+                      if (!b.checkIn || b.status === 'Cancelled' || b.status === 'CancelledByGuest') return false;
+                      const checkInDate = b.checkIn?.toDate ? b.checkIn.toDate() : new Date(b.checkIn);
+                      return checkInDate >= tomorrow && (b.status === 'Upcoming' || b.status === 'PendingApproval');
+                    }).sort((a, b) => {
+                      const dateA = a.checkIn?.toDate ? a.checkIn.toDate() : new Date(a.checkIn);
+                      const dateB = b.checkIn?.toDate ? b.checkIn.toDate() : new Date(b.checkIn);
+                      return dateA - dateB;
+                    });
+
+                    if (upcomingBookingsList.length > 0) {
+                      return upcomingBookingsList.map((booking) => (
+                        <div key={booking.id} className="flex items-center justify-between p-3 bg-blue-50 rounded-lg border border-blue-100">
+                          <div className="flex-1">
+                            <div className="font-medium text-sm text-gray-900">{booking.title || "Booking"}</div>
+                            <div className="text-xs text-gray-600 mt-1">
+                              {booking.guestName && booking.guestName !== 'Guest User' ? booking.guestName : 
+                               booking.guestEmail ? booking.guestEmail.split('@')[0] : 'Guest'}
+                            </div>
+                            <div className="text-xs text-gray-500 mt-1">
+                              Check-in: {booking.checkIn ? (new Date(booking.checkIn?.toDate ? booking.checkIn.toDate() : booking.checkIn).toLocaleDateString('en-US', { 
+                                month: 'short', 
+                                day: 'numeric',
+                                year: 'numeric'
+                              })) : 'TBD'}
+                            </div>
+                            {booking.checkOut && (
+                              <div className="text-xs text-gray-500">
+                                Check-out: {new Date(booking.checkOut?.toDate ? booking.checkOut.toDate() : booking.checkOut).toLocaleDateString('en-US', { 
+                                  month: 'short', 
+                                  day: 'numeric',
+                                  year: 'numeric'
+                                })}
+                              </div>
+                            )}
+                          </div>
+                          <div className="text-right ml-3">
+                            <p className="font-semibold text-sm text-blue-700">₱{(booking.total || 0).toLocaleString()}</p>
+                            <span className={`text-xs px-2 py-1 rounded-full ${
+                              booking.status === 'Upcoming' ? 'bg-green-100 text-green-700' :
+                              booking.status === 'PendingApproval' ? 'bg-yellow-100 text-yellow-700' :
+                              'bg-gray-100 text-gray-700'
+                            }`}>
+                              {booking.status || 'Pending'}
+                            </span>
+                          </div>
+                        </div>
+                      ));
+                    } else {
+                      return (
+                        <div className="text-center py-6 text-gray-500">
+                          <FaCalendarAlt className="text-3xl mx-auto mb-2 text-gray-300" />
+                          <p className="text-sm">No upcoming bookings</p>
+                        </div>
+                      );
+                    }
+                  })()}
+                </div>
+              </div>
+            </div>
 
             {/* Recent Activity */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -1501,38 +2667,51 @@ useEffect(() => {
                       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
                       .slice(0, 3)
                       .map((booking, idx) => (
-                        <div key={booking.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-yellow-100 rounded-full flex items-center justify-center">
-                              <span className="text-yellow-700 font-semibold text-sm">
-                                {booking.guestName && booking.guestName !== 'Guest User' ? booking.guestName.split(' ')[0][0] : 
-                                 booking.guestEmail ? booking.guestEmail.split('@')[0][0].toUpperCase() : 'G'}
-                              </span>
-          </div>
-            <div>
-                              <p className="font-medium text-sm">
-                                {booking.guestName && booking.guestName !== 'Guest User' ? booking.guestName : 
-                                 booking.guestEmail ? booking.guestEmail.split('@')[0] : 'Guest'}
+                        <div key={booking.id} className="bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
+                          <div className="flex items-start justify-between p-3">
+                            <div className="flex items-center gap-3 flex-1 min-w-0">
+                              <div className="w-10 h-10 bg-yellow-100 rounded-full flex items-center justify-center flex-shrink-0">
+                                <span className="text-yellow-700 font-semibold text-sm">
+                                  {booking.guestName && booking.guestName !== 'Guest User' ? booking.guestName.split(' ')[0][0] : 
+                                   booking.guestEmail ? booking.guestEmail.split('@')[0][0].toUpperCase() : 'G'}
+                                </span>
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="font-medium text-sm text-gray-900">
+                                  {booking.guestName && booking.guestName !== 'Guest User' ? booking.guestName : 
+                                   booking.guestEmail ? booking.guestEmail.split('@')[0] : 'Guest'}
+                                </p>
+                                <p className="text-xs text-gray-500 truncate">{booking.title}</p>
+                              </div>
+                            </div>
+                            <div className="text-right ml-3 flex-shrink-0">
+                              <p className="font-semibold text-sm">₱{booking.total?.toLocaleString() || booking.price}</p>
+                              <p className="text-xs text-gray-500">
+                                {booking.checkIn ? new Date(booking.checkIn).toLocaleDateString('en-US', { 
+                                  month: 'short', 
+                                  day: 'numeric' 
+                                }) : 'TBD'}
                               </p>
-                              <p className="text-xs text-gray-500">{booking.title}</p>
+                              <button
+                                onClick={() => handleMessageGuest(booking)}
+                                className="mt-1 text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 transition"
+                              >
+                                Message
+                              </button>
+                            </div>
+                          </div>
+                          {booking.notes && booking.notes.trim() && (
+                            <div className="px-3 pb-3 pt-2 bg-blue-50 border-t border-blue-200">
+                              <div className="flex items-start gap-2">
+                                <FaComments className="text-blue-600 text-xs mt-0.5 flex-shrink-0" />
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-xs font-semibold text-blue-800 mb-1">Wishlists:</div>
+                                  <div className="text-xs text-gray-700 whitespace-pre-wrap line-clamp-2">{booking.notes}</div>
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </div>
-                      </div>
-                      <div className="text-right">
-                            <p className="font-semibold text-sm">₱{booking.total?.toLocaleString() || booking.price}</p>
-                            <p className="text-xs text-gray-500">
-                              {booking.checkIn ? new Date(booking.checkIn).toLocaleDateString('en-US', { 
-                                month: 'short', 
-                                day: 'numeric' 
-                              }) : 'TBD'}
-                            </p>
-                            <button
-                              onClick={() => handleMessageGuest(booking)}
-                              className="mt-1 text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 transition"
-                            >
-                              Message
-                            </button>
-                      </div>
-                    </div>
                       ))
                   ) : (
                     <div className="text-center py-8 text-gray-500">
@@ -1576,6 +2755,18 @@ useEffect(() => {
                     <FaGift className="text-purple-600" />
                     <span className="text-sm font-medium text-purple-700">Rewards</span>
                   </button>
+                  {hostPoints >= 10 && (
+                    <button 
+                      onClick={() => setShowRedeemPointsModal(true)}
+                      className="flex items-center gap-3 p-4 bg-gradient-to-r from-pink-50 to-purple-50 rounded-lg hover:from-pink-100 hover:to-purple-100 transition border-2 border-pink-200"
+                    >
+                      <FaGift className="text-pink-600" />
+                      <div className="flex flex-col items-start">
+                        <span className="text-sm font-semibold text-pink-700">Redeem Points</span>
+                        <span className="text-xs text-pink-600">{hostPoints.toLocaleString()} pts</span>
+                      </div>
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -1586,23 +2777,73 @@ useEffect(() => {
         {activeTab === "listings" && (
           <div className="space-y-6">
             {/* Listings Header */}
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
-                <h2 className="text-2xl font-bold text-gray-900">My Listings</h2>
-                <p className="text-gray-600">Manage your properties and hosting experience</p>
+                <h2 className="text-xl md:text-2xl font-bold text-gray-900">My Listings</h2>
+                <p className="text-sm md:text-base text-gray-600">Manage your properties and hosting experience</p>
               </div>
               <button 
                 onClick={() => setShowAddListing(true)}
-                className="bg-yellow-400 text-white px-6 py-3 rounded-lg hover:bg-pink-600 transition flex items-center gap-2"
+                className="bg-yellow-400 text-white px-4 md:px-6 py-2 md:py-3 rounded-lg hover:bg-pink-600 transition flex items-center justify-center gap-2 text-sm md:text-base"
               >
                 <FaPlus />
-                Add New Listing
+                <span>Add New Listing</span>
               </button>
             </div>
 
+            {/* Category Filter Navigation */}
+            <div className="bg-[#f8f6f1] rounded-lg p-1">
+              <div className="flex gap-1 overflow-x-auto">
+                <button
+                  onClick={() => setSelectedCategory("All")}
+                  className={`flex-1 px-4 py-3 rounded-md font-medium transition-colors ${
+                    selectedCategory === "All"
+                      ? "bg-[#bfa14a] text-white"
+                      : "text-gray-700 hover:bg-white/50"
+                  }`}
+                >
+                  All
+                </button>
+                <button
+                  onClick={() => setSelectedCategory("Home")}
+                  className={`flex-1 px-4 py-3 rounded-md font-medium transition-colors ${
+                    selectedCategory === "Home"
+                      ? "bg-[#bfa14a] text-white"
+                      : "text-gray-700 hover:bg-white/50"
+                  }`}
+                >
+                  Home
+                </button>
+                <button
+                  onClick={() => setSelectedCategory("Experience")}
+                  className={`flex-1 px-4 py-3 rounded-md font-medium transition-colors ${
+                    selectedCategory === "Experience"
+                      ? "bg-[#bfa14a] text-white"
+                      : "text-gray-700 hover:bg-white/50"
+                  }`}
+                >
+                  Experience
+                </button>
+                <button
+                  onClick={() => setSelectedCategory("Service")}
+                  className={`flex-1 px-4 py-3 rounded-md font-medium transition-colors ${
+                    selectedCategory === "Service"
+                      ? "bg-[#bfa14a] text-white"
+                      : "text-gray-700 hover:bg-white/50"
+                  }`}
+                >
+                  Service
+                </button>
+              </div>
+            </div>
+
             {/* Listings Grid */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-              {listings.map((listing) => (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-4 md:gap-6">
+              {listings
+                .filter((listing) => 
+                  selectedCategory === "All" || listing.category === selectedCategory
+                )
+                .map((listing) => (
                 <div key={listing.id} className="bg-white rounded-xl shadow-lg overflow-hidden hover:shadow-xl transition">
                   {/* Listing Image */}
                   <div className="relative h-48 bg-gray-100">
@@ -1719,6 +2960,22 @@ useEffect(() => {
                       )}
                     </div>
 
+                    {/* Publish Button for Draft Listings */}
+                    {listing.status === 'Draft' && (
+                      <div className="mt-4 pt-4 border-t">
+                        <button
+                          onClick={() => handleToggleListingStatus(listing.id)}
+                          className="w-full bg-green-500 hover:bg-green-600 text-white py-2 px-4 rounded-lg font-semibold transition flex items-center justify-center gap-2 mb-2"
+                        >
+                          <FaEye />
+                          Publish Listing
+                        </button>
+                        <p className="text-xs text-gray-500 text-center">
+                          Publish this listing to make it visible to guests
+                        </p>
+                      </div>
+                    )}
+
                     {/* Action Buttons */}
                     <div className="flex gap-2 mt-4">
                       <button 
@@ -1739,6 +2996,27 @@ useEffect(() => {
                 </div>
               ))}
             </div>
+
+            {/* Empty State */}
+            {listings.filter((listing) => 
+              selectedCategory === "All" || listing.category === selectedCategory
+            ).length === 0 && (
+              <div className="text-center py-12 bg-white rounded-xl shadow-lg">
+                <p className="text-gray-500 text-lg mb-2">
+                  {selectedCategory === "All" 
+                    ? "No listings yet. Create your first listing!" 
+                    : `No ${selectedCategory.toLowerCase()} listings found.`}
+                </p>
+                {selectedCategory !== "All" && (
+                  <button
+                    onClick={() => setSelectedCategory("All")}
+                    className="text-[#bfa14a] hover:underline"
+                  >
+                    View all listings
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -1971,13 +3249,125 @@ useEffect(() => {
               </button>
             </div>
 
+            {/* Pending Withdrawal Requests */}
+            {withdrawalRequests.filter(r => r.status === 'pending').length > 0 && (
+              <div className="bg-yellow-50 border-l-4 border-yellow-500 rounded-xl shadow-lg p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    <FaClock className="text-yellow-600" />
+                    Pending Withdrawal Requests
+                  </h3>
+                  <span className="text-sm text-gray-600">
+                    {withdrawalRequests.filter(r => r.status === 'pending').length} pending
+                  </span>
+                </div>
+                <div className="space-y-3">
+                  {withdrawalRequests
+                    .filter(r => r.status === 'pending')
+                    .map((request) => (
+                      <div key={request.id} className="bg-white rounded-lg p-4 border border-yellow-200">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="font-semibold text-gray-900">₱{request.amount?.toLocaleString()}</p>
+                            <p className="text-sm text-gray-600">To: {request.method || 'PayPal'}</p>
+                            {request.paypalEmail && (
+                              <p className="text-sm text-blue-600">PayPal: {request.paypalEmail}</p>
+                            )}
+                            <p className="text-xs text-gray-500 mt-1">
+                              Requested: {request.requestedAt?.toDate ? 
+                                request.requestedAt.toDate().toLocaleDateString('en-US', { 
+                                  month: 'short', 
+                                  day: 'numeric', 
+                                  year: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit'
+                                }) : 
+                                request.createdAt ? 
+                                new Date(request.createdAt).toLocaleDateString('en-US', { 
+                                  month: 'short', 
+                                  day: 'numeric', 
+                                  year: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit'
+                                }) : 'N/A'}
+                            </p>
+                          </div>
+                          <span className="px-3 py-1 bg-yellow-100 text-yellow-800 rounded-full text-xs font-semibold">
+                            Pending Approval
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+
+            {/* Approved/Completed Withdrawal Requests */}
+            {withdrawalRequests.filter(r => r.status === 'approved').length > 0 && (
+              <div className="bg-green-50 border-l-4 border-green-500 rounded-xl shadow-lg p-6 mb-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    <FaCheckCircle className="text-green-600" />
+                    Approved Withdrawals
+                  </h3>
+                  <span className="text-sm text-gray-600">
+                    {withdrawalRequests.filter(r => r.status === 'approved').length} completed
+                  </span>
+                </div>
+                <div className="space-y-3">
+                  {withdrawalRequests
+                    .filter(r => r.status === 'approved')
+                    .slice(0, 5) // Show last 5 approved withdrawals
+                    .map((request) => (
+                      <div key={request.id} className="bg-white rounded-lg p-4 border border-green-200">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="font-semibold text-gray-900">₱{request.amount?.toLocaleString()}</p>
+                            <p className="text-sm text-gray-600">To: {request.method || 'PayPal'}</p>
+                            {request.paypalEmail && (
+                              <p className="text-sm text-blue-600">PayPal: {request.paypalEmail}</p>
+                            )}
+                            <p className="text-xs text-gray-500 mt-1">
+                              Approved: {request.approvedAt?.toDate ? 
+                                request.approvedAt.toDate().toLocaleDateString('en-US', { 
+                                  month: 'short', 
+                                  day: 'numeric', 
+                                  year: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit'
+                                }) : 
+                                request.updatedAt?.toDate ?
+                                request.updatedAt.toDate().toLocaleDateString('en-US', { 
+                                  month: 'short', 
+                                  day: 'numeric', 
+                                  year: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit'
+                                }) : 'N/A'}
+                            </p>
+                            {request.payoutBatchId && (
+                              <p className="text-xs text-gray-400 mt-1">
+                                Batch ID: {request.payoutBatchId}
+                              </p>
+                            )}
+                          </div>
+                          <span className="px-3 py-1 bg-green-100 text-green-800 rounded-full text-xs font-semibold">
+                            Approved
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+
             {/* Stats Grid */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-blue-500">
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-gray-600">Total Transactions</p>
-                    <p className="text-2xl font-bold text-gray-900">{transactions.length}</p>
+                    <p className="text-2xl font-bold text-gray-900">{transactions.length + bookingTransactions.length}</p>
                   </div>
                   <FaHistory className="text-3xl text-blue-500" />
                 </div>
@@ -1988,7 +3378,11 @@ useEffect(() => {
                   <div>
                     <p className="text-sm font-medium text-gray-600">Total Earnings</p>
                     <p className="text-2xl font-bold text-gray-900">
-                      ₱{transactions.filter(t => t.type === 'earning').reduce((sum, t) => sum + t.amount, 0).toLocaleString()}
+                      ₱{(() => {
+                        const earningsFromTransactions = transactions.filter(t => t.type === 'earning').reduce((sum, t) => sum + (t.amount || 0), 0);
+                        const earningsFromBookings = bookingTransactions.filter(t => t.type === 'booking').reduce((sum, t) => sum + (t.amount || 0), 0);
+                        return earningsFromTransactions + earningsFromBookings;
+                      })().toLocaleString()}
                     </p>
                   </div>
                   <FaMoneyBillWave className="text-3xl text-green-500" />
@@ -2014,65 +3408,118 @@ useEffect(() => {
                 <h3 className="text-xl font-bold text-gray-900">Transaction History</h3>
                 <div className="flex items-center gap-2">
                   <FaHistory className="text-gray-400" />
-                  <span className="text-sm text-gray-600">{transactions.length} transactions</span>
+                  <span className="text-sm text-gray-600">
+                    {transactions.length + bookingTransactions.length} transactions
+                  </span>
                 </div>
               </div>
 
-              {transactions.length > 0 ? (
-                <div className="space-y-3">
-                  {transactions.slice(0, 10).map((transaction) => (
-                    <div 
-                      key={transaction.id}
-                      className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition"
-                    >
-                      <div className="flex items-center gap-4">
-                        <div className={`w-12 h-12 rounded-full flex items-center justify-center ${
-                          transaction.type === 'earning' ? 'bg-green-100' : 'bg-blue-100'
-                        }`}>
-                          {getTransactionIcon(transaction.type)}
-                        </div>
-                        <div>
-                          <p className="font-semibold text-gray-900">{transaction.description}</p>
-                          <div className="flex items-center gap-2 text-sm text-gray-600">
-                            <span>{new Date(transaction.date).toLocaleDateString('en-US', { 
-                              month: 'short', 
-                              day: 'numeric', 
-                              year: 'numeric',
-                              hour: '2-digit',
-                              minute: '2-digit'
-                            })}</span>
-                            <span>•</span>
-                            <span className={`px-2 py-1 rounded-full text-xs ${
-                              transaction.status === 'completed' ? 'bg-green-100 text-green-700' : 
-                              transaction.status === 'processing' ? 'bg-yellow-100 text-yellow-700' : 
-                              'bg-gray-100 text-gray-700'
+              {(() => {
+                // Combine regular transactions and booking transactions
+                const allTransactions = [
+                  ...transactions.map(t => ({ ...t, source: 'transaction' })),
+                  ...bookingTransactions.map(t => ({ ...t, source: 'booking' }))
+                ].sort((a, b) => {
+                  const dateA = a.date?.toDate ? a.date.toDate() : 
+                               a.date ? new Date(a.date) : 
+                               a.createdAt ? new Date(a.createdAt) : new Date(0);
+                  const dateB = b.date?.toDate ? b.date.toDate() : 
+                               b.date ? new Date(b.date) : 
+                               b.createdAt ? new Date(b.createdAt) : new Date(0);
+                  return dateB - dateA; // Most recent first
+                });
+
+                return allTransactions.length > 0 ? (
+                  <div className="space-y-3">
+                    {allTransactions.slice(0, 20).map((transaction) => {
+                      const transactionType = transaction.type || transaction.displayType || 'transaction';
+                      const isPositive = (transaction.amount || 0) >= 0;
+                      const amount = Math.abs(transaction.amount || 0);
+                      
+                      return (
+                        <div 
+                          key={transaction.id}
+                          className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition"
+                        >
+                          <div className="flex items-center gap-4">
+                            <div className={`w-12 h-12 rounded-full flex items-center justify-center ${
+                              transactionType === 'earning' || transactionType === 'booking' || transactionType === 'cancellation-payout' ? 'bg-green-100' : 
+                              transactionType === 'cancellation' ? 'bg-red-100' : 
+                              'bg-blue-100'
                             }`}>
-                              {transaction.status}
-                            </span>
+                              {transactionType === 'booking' ? <FaCalendarCheck className="text-green-500" /> :
+                               transactionType === 'cancellation-payout' ? <FaMoneyBillWave className="text-green-500" /> :
+                               transactionType === 'cancellation' ? <FaTimes className="text-red-500" /> :
+                               getTransactionIcon(transactionType)}
+                            </div>
+                            <div>
+                              <p className="font-semibold text-gray-900">
+                                {transaction.displayType || transaction.description || transactionType}
+                              </p>
+                              {transaction.guestName && (
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                  Guest: {transaction.guestName} • {transaction.listingTitle || ''}
+                                </p>
+                              )}
+                              <div className="flex items-center gap-2 text-sm text-gray-600">
+                                <span>{(() => {
+                                  let dateValue = transaction.date;
+                                  if (dateValue?.toDate) {
+                                    dateValue = dateValue.toDate();
+                                  } else if (typeof dateValue === 'string') {
+                                    dateValue = new Date(dateValue);
+                                  } else if (!dateValue && transaction.createdAt) {
+                                    dateValue = transaction.createdAt;
+                                    if (typeof dateValue === 'string') {
+                                      dateValue = new Date(dateValue);
+                                    }
+                                  }
+                                  if (!dateValue || isNaN(new Date(dateValue).getTime())) {
+                                    return 'N/A';
+                                  }
+                                  return new Date(dateValue).toLocaleDateString('en-US', { 
+                                    month: 'short', 
+                                    day: 'numeric', 
+                                    year: 'numeric',
+                                    hour: '2-digit',
+                                    minute: '2-digit'
+                                  });
+                                })()}</span>
+                                <span>•</span>
+                                <span className={`px-2 py-1 rounded-full text-xs ${
+                                  transaction.status === 'completed' ? 'bg-green-100 text-green-700' : 
+                                  transaction.status === 'processing' ? 'bg-yellow-100 text-yellow-700' : 
+                                  transaction.status === 'upcoming' ? 'bg-blue-100 text-blue-700' :
+                                  'bg-gray-100 text-gray-700'
+                                }`}>
+                                  {transaction.status || 'completed'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className={`text-lg font-bold ${
+                              isPositive ? 'text-green-600' : 'text-red-600'
+                            }`}>
+                              {isPositive ? '+' : '-'}₱{amount.toLocaleString()}
+                            </p>
+                            {transaction.method && (
+                              <p className="text-xs text-gray-500">{transaction.method}</p>
+                            )}
                           </div>
                         </div>
-                      </div>
-                      <div className="text-right">
-                        <p className={`text-lg font-bold ${
-                          transaction.type === 'earning' ? 'text-green-600' : 'text-blue-600'
-                        }`}>
-                          {transaction.type === 'earning' ? '+' : '-'}₱{transaction.amount.toLocaleString()}
-                        </p>
-                        {transaction.method && (
-                          <p className="text-xs text-gray-500">{transaction.method}</p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-center py-12 text-gray-500">
-                  <FaWallet className="text-6xl mx-auto mb-4 text-gray-300" />
-                  <h3 className="text-lg font-semibold mb-2">No Transactions Yet</h3>
-                  <p className="text-sm">Your transaction history will appear here</p>
-                  <p className="text-sm">Start earning by accepting bookings!</p>
-                </div>
-              )}
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="text-center py-12 text-gray-500">
+                    <FaWallet className="text-6xl mx-auto mb-4 text-gray-300" />
+                    <h3 className="text-lg font-semibold mb-2">No Transactions Yet</h3>
+                    <p className="text-sm">Your transaction history will appear here</p>
+                    <p className="text-sm">Start earning by accepting bookings!</p>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Payment Methods Info */}
@@ -2101,7 +3548,7 @@ useEffect(() => {
         {/* Withdraw Modal */}
         {showWithdrawModal && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-            <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-md">
+            <div className="bg-white rounded-xl shadow-lg p-4 md:p-8 w-full max-w-md mx-4">
               <div className="flex items-center justify-between mb-6">
                 <h3 className="text-2xl font-bold text-gray-900">Withdraw Funds</h3>
                 <button 
@@ -2136,19 +3583,19 @@ useEffect(() => {
 
                   <div>
                     <label className="block text-sm font-semibold text-gray-700 mb-2">
-                      Withdrawal Method
+                      PayPal Email Address (Sandbox)
                     </label>
-                    <select
-                      value={withdrawMethod}
-                      onChange={(e) => setWithdrawMethod(e.target.value)}
+                    <input
+                      type="email"
+                      value={paypalEmail}
+                      onChange={(e) => setPaypalEmail(e.target.value)}
                       className="w-full border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-green-500"
-                    >
-                      {paymentMethods.filter(p => p.status === 'Active').map((method) => (
-                        <option key={method.id} value={method.type}>
-                          {method.type} - {method.account}
-                        </option>
-                      ))}
-                    </select>
+                      placeholder="your-email@example.com"
+                      required
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Enter your PayPal Sandbox email address to receive the withdrawal
+                    </p>
                   </div>
                 </div>
               </div>
@@ -2172,10 +3619,93 @@ useEffect(() => {
           </div>
         )}
 
+        {/* Redeem Points Modal */}
+        {showRedeemPointsModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-lg p-4 md:p-8 w-full max-w-md mx-4">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-2xl font-bold text-gray-900">Redeem Points for Cash</h3>
+                <button 
+                  onClick={() => {
+                    setShowRedeemPointsModal(false);
+                    setRedeemPointsAmount('');
+                  }}
+                  className="p-2 rounded-lg hover:bg-gray-100 transition"
+                >
+                  <FaTimes className="text-gray-600" />
+                </button>
+              </div>
+
+              <div className="mb-6">
+                <div className="bg-pink-50 rounded-lg p-4 mb-4">
+                  <p className="text-sm text-gray-600 mb-1">Available Points</p>
+                  <p className="text-3xl font-bold text-pink-600">{hostPoints.toLocaleString()}</p>
+                  <p className="text-xs text-pink-600 mt-2">
+                    Conversion Rate: 10 points = ₱1.00
+                  </p>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Points to Redeem
+                    </label>
+                    <input
+                      type="number"
+                      value={redeemPointsAmount}
+                      onChange={(e) => setRedeemPointsAmount(e.target.value)}
+                      className="w-full border rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      placeholder="Enter points to redeem"
+                      min="10"
+                      max={hostPoints}
+                      step="10"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Minimum: 10 points (₱1.00)
+                    </p>
+                  </div>
+
+                  {redeemPointsAmount && parseInt(redeemPointsAmount) > 0 && (
+                    <div className="bg-blue-50 rounded-lg p-4">
+                      <p className="text-sm text-gray-600 mb-1">You will receive:</p>
+                      <p className="text-2xl font-bold text-blue-600">
+                        ₱{(parseInt(redeemPointsAmount) / 10).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </p>
+                      <p className="text-xs text-gray-500 mt-1">
+                        {parseInt(redeemPointsAmount).toLocaleString()} points × ₱0.10 per point
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => {
+                    setShowRedeemPointsModal(false);
+                    setRedeemPointsAmount('');
+                  }}
+                  className="flex-1 bg-gray-200 text-gray-700 px-4 py-3 rounded-lg hover:bg-gray-300 transition font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleRedeemPoints}
+                  disabled={!redeemPointsAmount || parseInt(redeemPointsAmount) < 10 || parseInt(redeemPointsAmount) > hostPoints}
+                  className="flex-1 bg-pink-500 text-white px-4 py-3 rounded-lg hover:bg-pink-600 transition font-semibold disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  <FaGift />
+                  Redeem Points
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Rewards & Coupons Management Modal */}
         {showRewardsModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 overflow-y-auto py-8">
-            <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-5xl relative my-auto max-h-[90vh] overflow-y-auto">
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 overflow-y-auto p-4">
+            <div className="bg-white rounded-xl shadow-lg p-4 md:p-8 w-full max-w-5xl relative my-auto max-h-[90vh] overflow-y-auto">
               <div className="flex items-center justify-between mb-6 sticky top-0 bg-white z-10 pb-4">
                 <div className="flex items-center gap-3">
                   <div className="w-12 h-12 bg-gradient-to-br from-pink-500 to-purple-500 rounded-full flex items-center justify-center">
@@ -2214,6 +3744,14 @@ useEffect(() => {
                   <p className="text-sm font-medium text-pink-700">Host Points</p>
                   <p className="text-3xl font-bold text-pink-900">{hostPoints.toLocaleString()}</p>
                   <p className="text-xs text-pink-600 mt-1">Earn 50 points per booking</p>
+                  {hostPoints > 0 && (
+                    <button
+                      onClick={() => setShowRedeemPointsModal(true)}
+                      className="mt-2 w-full bg-pink-500 text-white px-3 py-1.5 rounded-lg hover:bg-pink-600 transition text-sm font-semibold"
+                    >
+                      Redeem for Cash
+                    </button>
+                  )}
                 </div>
                 <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-4">
                   <p className="text-sm font-medium text-purple-700">Host Level</p>
@@ -2363,8 +3901,8 @@ useEffect(() => {
 
         {/* Add Coupon Modal */}
         {showAddCouponModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
-            <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-2xl">
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60] p-4">
+            <div className="bg-white rounded-xl shadow-lg p-4 md:p-8 w-full max-w-2xl">
               <div className="flex items-center justify-between mb-6">
                 <h3 className="text-2xl font-bold text-gray-900">Create New Coupon</h3>
                 <button 
@@ -2516,8 +4054,8 @@ useEffect(() => {
 
       {/* Edit Listing Modal */}
       {showEditListing && (
-        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-2xl relative max-h-[80vh] overflow-y-auto my-8">
+        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-lg p-4 md:p-8 w-full max-w-2xl relative max-h-[90vh] overflow-y-auto">
             <button
               onClick={() => setShowEditListing(false)}
               className="sticky top-2 right-4 float-right text-xl text-gray-400 hover:text-pink-500"
@@ -2577,8 +4115,26 @@ useEffect(() => {
                   value={newListing.location}
                   onChange={(e) => setNewListing({...newListing, location: e.target.value})}
                   className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
-                  placeholder="Enter location"
+                  placeholder="Enter location (e.g., Manila, Philippines)"
                 />
+                {newListing.location && (
+                  <div className="mt-3 rounded-lg overflow-hidden border">
+                    <div className="relative w-full h-48">
+                      <iframe
+                        title="Location Map"
+                        src={`https://www.google.com/maps?q=${encodeURIComponent(newListing.location)}&z=14&output=embed`}
+                        className="w-full h-full"
+                        loading="lazy"
+                        allowFullScreen
+                        referrerPolicy="no-referrer-when-downgrade"
+                      />
+                    </div>
+                    <div className="p-2 bg-gray-50 text-xs text-gray-600 flex items-center gap-2">
+                      <FaMapMarkerAlt className="text-red-500" />
+                      <span>{newListing.location}</span>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Image Upload Section */}
@@ -2818,6 +4374,13 @@ useEffect(() => {
                 Cancel
               </button>
               <button
+                onClick={() => handleSaveDraft(true)}
+                className="flex-1 border border-gray-400 text-gray-700 px-4 py-3 rounded-lg hover:bg-gray-100 transition font-semibold flex items-center justify-center gap-2"
+              >
+                <FaSave />
+                Save as Draft
+              </button>
+              <button
                 onClick={handleUpdateListing}
                 className="flex-1 bg-yellow-400 text-white px-4 py-3 rounded-lg hover:bg-pink-600 transition font-semibold flex items-center gap-2"
               >
@@ -2831,8 +4394,8 @@ useEffect(() => {
 
       {/* Add Listing Modal */}
       {showAddListing && (
-        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-start justify-center z-50 overflow-y-auto py-8">
-          <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-2xl relative my-auto">
+        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-start justify-center z-50 overflow-y-auto p-4">
+          <div className="bg-white rounded-xl shadow-lg p-4 md:p-8 w-full max-w-2xl relative my-auto">
             <button
               onClick={() => setShowAddListing(false)}
               className="absolute top-2 right-4 text-xl text-gray-400 hover:text-blue-500"
@@ -2892,8 +4455,26 @@ useEffect(() => {
                   value={newListing.location}
                   onChange={(e) => setNewListing({...newListing, location: e.target.value})}
                   className="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500"
-                  placeholder="Enter location"
+                  placeholder="Enter location (e.g., Manila, Philippines)"
                 />
+                {newListing.location && (
+                  <div className="mt-3 rounded-lg overflow-hidden border">
+                    <div className="relative w-full h-48">
+                      <iframe
+                        title="Location Map"
+                        src={`https://www.google.com/maps?q=${encodeURIComponent(newListing.location)}&z=14&output=embed`}
+                        className="w-full h-full"
+                        loading="lazy"
+                        allowFullScreen
+                        referrerPolicy="no-referrer-when-downgrade"
+                      />
+                    </div>
+                    <div className="p-2 bg-gray-50 text-xs text-gray-600 flex items-center gap-2">
+                      <FaMapMarkerAlt className="text-red-500" />
+                      <span>{newListing.location}</span>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Image Upload Section */}
@@ -3134,6 +4715,13 @@ useEffect(() => {
                 Cancel
               </button>
               <button
+                onClick={() => handleSaveDraft(false)}
+                className="flex-1 border border-gray-400 text-gray-700 px-4 py-3 rounded-lg hover:bg-gray-100 transition font-semibold flex items-center justify-center gap-2"
+              >
+                <FaSave />
+                Save as Draft
+              </button>
+              <button
                 onClick={handleAddNewListing}
                 className="flex-1 bg-yellow-400 text-white px-4 py-3 rounded-lg hover:bg-pink-600 transition font-semibold flex items-center gap-2"
               >
@@ -3147,8 +4735,8 @@ useEffect(() => {
 
       {/* Messages Modal */}
       {showMessages && (
-        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-start justify-center z-50 overflow-y-auto py-8">
-          <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-2xl relative my-auto">
+        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-start justify-center z-50 overflow-y-auto p-4">
+          <div className="bg-white rounded-xl shadow-lg p-4 md:p-8 w-full max-w-2xl relative my-auto">
             <button
               onClick={() => setShowMessages(false)}
               className="sticky top-2 right-4 float-right text-xl text-gray-400 hover:text-purple-500"
@@ -3201,8 +4789,8 @@ useEffect(() => {
 
       {/* Account Settings Modal */}
       {showAccountSettings && (
-        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-start justify-center z-50 overflow-y-auto py-8">
-          <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-2xl relative my-auto">
+        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-start justify-center z-50 overflow-y-auto p-4">
+          <div className="bg-white rounded-xl shadow-lg p-4 md:p-8 w-full max-w-2xl relative my-auto">
             <button
               onClick={() => setShowAccountSettings(false)}
               className="absolute top-2 right-4 text-xl text-gray-400 hover:text-blue-500"
@@ -3515,10 +5103,15 @@ useEffect(() => {
                         </div>
                       </div>
                       
-                      {booking.notes && (
-                        <div className="mt-3 p-3 bg-white rounded-lg">
-                          <span className="text-gray-500 text-sm">Notes:</span>
-                          <p className="text-sm text-gray-700 mt-1">{booking.notes}</p>
+                      {booking.notes && booking.notes.trim() && (
+                        <div className="mt-3 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                          <div className="flex items-start gap-2">
+                            <FaComments className="text-blue-600 text-lg mt-0.5 flex-shrink-0" />
+                            <div className="flex-1">
+                              <span className="text-blue-800 font-semibold text-sm block mb-2">Special Requests from Guest:</span>
+                              <p className="text-sm text-gray-800 whitespace-pre-wrap bg-white rounded p-3 border border-blue-200">{booking.notes}</p>
+                            </div>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -3617,6 +5210,17 @@ useEffect(() => {
                             <p className="text-sm font-medium text-blue-600 mt-1">
                               ₱{booking.total?.toLocaleString()}
                             </p>
+                            {booking.notes && (
+                              <div className="mt-2 bg-blue-50 border border-blue-200 rounded-lg p-2">
+                                <div className="flex items-start gap-2">
+                                  <FaComments className="text-blue-500 text-xs mt-0.5 flex-shrink-0" />
+                                  <div className="flex-1">
+                                    <div className="text-xs font-semibold text-blue-800 mb-1">Wishlists:</div>
+                                    <div className="text-xs text-gray-700 whitespace-pre-wrap">{booking.notes}</div>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         </div>
                         <div className="flex gap-2 mt-3">

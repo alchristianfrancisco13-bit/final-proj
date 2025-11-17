@@ -3,6 +3,7 @@ import emailjs from '@emailjs/browser';
 import { doc, setDoc, getDoc } from "firebase/firestore";
 import { db } from "./firebase";
 import { EMAILJS_CONFIG, OTP_CONFIG, FIRESTORE_COLLECTIONS } from "./config";
+import { buildOtpEmailTemplate } from "./utils/emailTemplates";
 
 function OTPVerification({ email, role, name, phone, onVerificationSuccess, onBack }) {
   const [otp, setOtp] = useState("");
@@ -49,6 +50,21 @@ function OTPVerification({ email, role, name, phone, onVerificationSuccess, onBa
         passcode: otpCode,
         time: formattedTime,
         user_email: email,
+        user_name: name || email?.split("@")[0] || "",
+        name: name || email?.split("@")[0] || "",
+        brand_name: EMAILJS_CONFIG.BRAND_NAME || "StayHub",
+        brand_tagline: EMAILJS_CONFIG.BRAND_TAGLINE || "Home stays & experiences",
+        support_email: EMAILJS_CONFIG.SUPPORT_EMAIL || "support@stayhub.example",
+        app_url: EMAILJS_CONFIG.APP_URL || window.location.origin,
+        current_year: new Date().getFullYear(),
+        message_html: buildOtpEmailTemplate({
+          recipientName: name || email?.split("@")[0] || "",
+          otpCode,
+          expiresAt: formattedTime,
+          supportEmail: EMAILJS_CONFIG.SUPPORT_EMAIL || "support@stayhub.example",
+          appUrl: EMAILJS_CONFIG.APP_URL || window.location.origin,
+          brandName: EMAILJS_CONFIG.BRAND_NAME || "StayHub"
+        }),
       };
 
       await emailjs.send(
