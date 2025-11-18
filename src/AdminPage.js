@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import {FaMoneyBillWave,FaChartBar,FaFileAlt,FaSignOutAlt,FaGavel,FaCheck,FaTimes,FaClock,FaUser,FaCalendarAlt,FaChevronLeft,FaChevronRight,FaGift,FaStar} from "react-icons/fa";
+import {FaMoneyBillWave,FaChartBar,FaFileAlt,FaSignOutAlt,FaGavel,FaCheck,FaTimes,FaClock,FaUser,FaCalendarAlt,FaChevronLeft,FaChevronRight,FaGift,FaStar,FaCheckCircle,FaTimesCircle} from "react-icons/fa";
 import adminlogo from "./adminlogo.webp";
 // ✅ Toastify imports
 import { toast, ToastContainer } from "react-toastify";
@@ -287,6 +287,30 @@ const ReportDateRangePicker = ({ startDate, endDate, onChange }) => {
     onChange({ startDate: startDateStr, endDate: endDateStr });
   };
 
+  const handleFullYearClick = () => {
+    const year = currentYear;
+    // Get first day of the year
+    const firstDay = new Date(year, 0, 1);
+    // Get last day of the year
+    const lastDay = new Date(year, 11, 31);
+    
+    const startDateStr = firstDay.toISOString().split('T')[0];
+    const endDateStr = lastDay.toISOString().split('T')[0];
+
+    setSelectedMonth(null);
+    setSelectedYear(year);
+    onChange({ startDate: startDateStr, endDate: endDateStr });
+  };
+
+  const isFullYearSelected = () => {
+    if (!startDate || !endDate) return false;
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    return start.getFullYear() === currentYear && 
+           start.getMonth() === 0 && start.getDate() === 1 &&
+           end.getMonth() === 11 && end.getDate() === 31;
+  };
+
   const isMonthSelected = (month, year) => {
     return selectedMonth === month && selectedYear === year;
   };
@@ -414,30 +438,51 @@ const ReportDateRangePicker = ({ startDate, endDate, onChange }) => {
           })}
         </div>
       ) : (
-        <div className="grid grid-cols-3 gap-3">
-          {monthNames.map((month, index) => {
-            const isSelected = isMonthSelected(index, currentYear);
-            const isCurrentMonth = currentYear === new Date().getFullYear() && index === new Date().getMonth();
+        <div>
+          {/* Full Year Option */}
+          <div className="mb-3">
+            <button
+              type="button"
+              onClick={handleFullYearClick}
+              className={`
+                w-full p-3 rounded-lg text-sm font-bold transition-all duration-200
+                ${isFullYearSelected()
+                  ? 'bg-red-500 text-white shadow-lg scale-105 z-10'
+                  : 'bg-gradient-to-r from-blue-50 to-purple-50 text-gray-700 hover:from-blue-100 hover:to-purple-100 hover:text-red-600 hover:scale-102 border-2 border-blue-200'
+                }
+                active:scale-95
+              `}
+            >
+              📅 Select Full Year ({currentYear})
+            </button>
+          </div>
+          
+          {/* Monthly Options */}
+          <div className="grid grid-cols-3 gap-3">
+            {monthNames.map((month, index) => {
+              const isSelected = isMonthSelected(index, currentYear);
+              const isCurrentMonth = currentYear === new Date().getFullYear() && index === new Date().getMonth();
 
-            return (
-              <button
-                key={index}
-                type="button"
-                onClick={() => handleMonthClick(index)}
-                className={`
-                  p-4 rounded-lg text-sm font-semibold transition-all duration-200
-                  ${isSelected
-                    ? 'bg-red-500 text-white shadow-lg scale-105 z-10'
-                    : 'bg-white text-gray-700 hover:bg-red-50 hover:text-red-600 hover:scale-105 border border-gray-200'
-                  }
-                  ${isCurrentMonth && !isSelected ? 'ring-2 ring-red-400' : ''}
-                  active:scale-95
-                `}
-              >
-                {fullMonthNames[index]}
-              </button>
-            );
-          })}
+              return (
+                <button
+                  key={index}
+                  type="button"
+                  onClick={() => handleMonthClick(index)}
+                  className={`
+                    p-4 rounded-lg text-sm font-semibold transition-all duration-200
+                    ${isSelected
+                      ? 'bg-red-500 text-white shadow-lg scale-105 z-10'
+                      : 'bg-white text-gray-700 hover:bg-red-50 hover:text-red-600 hover:scale-105 border border-gray-200'
+                    }
+                    ${isCurrentMonth && !isSelected ? 'ring-2 ring-red-400' : ''}
+                    active:scale-95
+                  `}
+                >
+                  {fullMonthNames[index]}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -445,29 +490,49 @@ const ReportDateRangePicker = ({ startDate, endDate, onChange }) => {
       <div className="mt-5 pt-4 border-t-2 border-gray-200">
         {/* Status indicator */}
         <div className="mb-3 p-3 rounded-lg bg-blue-50 border border-blue-200">
-          {!selectedMonth && selectedMonth !== 0 ? (
+          {!startDate || !endDate ? (
             <div className="flex items-center gap-2 text-blue-700">
               <FaCalendarAlt className="text-blue-500" />
-              <span className="font-semibold text-sm">Select a year, then choose a month for your monthly report</span>
+              <span className="font-semibold text-sm">Select a year, then choose a month or full year for your report</span>
             </div>
           ) : (
             <div className="flex items-center gap-2 text-green-700">
               <FaCheck className="text-green-500" />
-              <span className="font-semibold text-sm">Month selected for report!</span>
+              <span className="font-semibold text-sm">
+                {isFullYearSelected() ? 'Full year selected for report!' : 'Month selected for report!'}
+              </span>
             </div>
           )}
         </div>
 
-        {/* Selected month display */}
-        {selectedMonth !== null && selectedYear !== null && (
+        {/* Selected period display */}
+        {(startDate && endDate) && (
           <div className="p-3 bg-gray-50 rounded-lg">
             <div className="flex items-center gap-3">
               <div className="w-3 h-3 rounded-full bg-red-500"></div>
               <div className="flex-1">
-                <span className="text-xs text-gray-500 font-medium">Selected Month:</span>
-                <p className="text-sm font-bold text-gray-800">
-                  {fullMonthNames[selectedMonth]} {selectedYear}
-                </p>
+                {isFullYearSelected() ? (
+                  <>
+                    <span className="text-xs text-gray-500 font-medium">Selected Year:</span>
+                    <p className="text-sm font-bold text-gray-800">
+                      Full Year {selectedYear || currentYear}
+                    </p>
+                  </>
+                ) : selectedMonth !== null && selectedYear !== null ? (
+                  <>
+                    <span className="text-xs text-gray-500 font-medium">Selected Month:</span>
+                    <p className="text-sm font-bold text-gray-800">
+                      {fullMonthNames[selectedMonth]} {selectedYear}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-xs text-gray-500 font-medium">Selected Date Range:</span>
+                    <p className="text-sm font-bold text-gray-800">
+                      {startDate} to {endDate}
+                    </p>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -902,25 +967,82 @@ function AdminPage({ onLogout }) {
             row.map(cell => replacePesoSign(cell))
           );
           
+          // Calculate available width for table
+          const availableWidth = pageWidth - (margin * 2);
+          
+          // Process columnStyles - convert 'auto' to undefined and validate widths
+          let columnStyles = item.columnStyles || {};
+          let hasAutoWidth = false;
+          let totalFixedWidth = 0;
+          
+          // Check if any column uses 'auto' or if widths exceed available space
+          Object.keys(columnStyles).forEach(key => {
+            const style = columnStyles[key];
+            if (style.cellWidth === 'auto' || style.cellWidth === undefined) {
+              hasAutoWidth = true;
+              delete style.cellWidth; // Remove to let autoTable calculate
+            } else if (typeof style.cellWidth === 'number') {
+              totalFixedWidth += style.cellWidth;
+            }
+          });
+          
+          // If total fixed width exceeds available width, use auto sizing
+          if (totalFixedWidth > availableWidth) {
+            // Convert all to auto
+            Object.keys(columnStyles).forEach(key => {
+              if (columnStyles[key].cellWidth) {
+                delete columnStyles[key].cellWidth;
+              }
+            });
+            hasAutoWidth = true;
+          }
+          
           autoTable(pdf, {
             head: [cleanHeaders],
             body: cleanRows,
             startY: startY,
             margin: { left: margin, right: margin },
+            tableWidth: availableWidth,
             styles: {
-              fontSize: 9,
-              cellPadding: 3,
+              fontSize: 7,
+              cellPadding: 2,
               overflow: 'linebreak',
-              cellWidth: 'wrap'
+              cellWidth: 'wrap',
+              halign: 'left',
+              valign: 'middle',
+              lineWidth: 0.1
             },
             headStyles: {
               fillColor: [220, 53, 69], // Red color
               textColor: 255,
-              fontStyle: 'bold'
+              fontStyle: 'bold',
+              halign: 'center',
+              fontSize: 8
             },
-            columnStyles: item.columnStyles || {},
+            columnStyles: columnStyles,
             didDrawPage: (data) => {
               startY = data.cursor.y + 10;
+            },
+            // Enable text wrapping and prevent overflow
+            didParseCell: (data) => {
+              // Ensure text is properly formatted for wrapping
+              if (data.cell.text) {
+                // Convert to array if it's a string
+                if (typeof data.cell.text === 'string') {
+                  data.cell.text = [data.cell.text];
+                }
+                // Truncate very long single words to prevent overflow
+                if (Array.isArray(data.cell.text)) {
+                  data.cell.text = data.cell.text.map(line => {
+                    const text = String(line);
+                    // If a single word/line is extremely long, truncate it
+                    if (text.length > 40) {
+                      return text.substring(0, 37) + '...';
+                    }
+                    return text;
+                  });
+                }
+              }
             }
           });
           startY = pdf.lastAutoTable.finalY + 10;
@@ -1237,6 +1359,73 @@ function AdminPage({ onLogout }) {
           1: { cellWidth: 50, halign: 'right' }
         }
       });
+      reportContent.push({ type: 'spacing', value: 10 });
+
+      // Booking Status Breakdown
+      reportContent.push({
+        type: 'section',
+        text: 'BOOKING STATUS BREAKDOWN'
+      });
+      
+      // Get all bookings (not just transactions) for status breakdown
+      const bookingsRef = collection(db, "bookings");
+      const allBookingsSnapshot = await getDocs(bookingsRef);
+      const allBookings = allBookingsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      
+      // Filter bookings by date range
+      const filteredBookingsForStatus = allBookings.filter(booking => {
+        if (!startDate && !endDate) return true;
+        const bookingDate = booking.createdAt?.toDate ? booking.createdAt.toDate() : new Date(booking.createdAt || booking.bookingDate);
+        if (startDate) {
+          const start = new Date(startDate);
+          start.setHours(0, 0, 0, 0);
+          if (bookingDate < start) return false;
+        }
+        if (endDate) {
+          const end = new Date(endDate);
+          end.setHours(23, 59, 59, 999);
+          if (bookingDate > end) return false;
+        }
+        return true;
+      });
+      
+      // Categorize bookings by status
+      const completedBookings = filteredBookingsForStatus.filter(b => 
+        b.status === "Completed" || b.status === "completed" || 
+        (b.status !== "PendingApproval" && b.status !== "pending" && 
+         b.status !== "CancelledByGuest" && b.status !== "Cancelled" && 
+         b.status !== "CancelledByHost")
+      );
+      const canceledBookings = filteredBookingsForStatus.filter(b => 
+        b.status === "CancelledByGuest" || b.status === "Cancelled" || b.status === "CancelledByHost"
+      );
+      const pendingBookings = filteredBookingsForStatus.filter(b => 
+        b.status === "PendingApproval" || b.status === "pending"
+      );
+      
+      // Calculate totals for each status
+      const completedTotal = completedBookings.reduce((sum, b) => sum + (Number(b.total) || 0), 0);
+      const canceledTotal = canceledBookings.reduce((sum, b) => sum + (Number(b.total) || 0), 0);
+      const pendingTotal = pendingBookings.reduce((sum, b) => sum + (Number(b.total) || 0), 0);
+      
+      reportContent.push({
+        type: 'table',
+        headers: ['Status', 'Count', 'Total Amount'],
+        rows: [
+          ['Completed', completedBookings.length.toString(), `₱${completedTotal.toLocaleString()}`],
+          ['Canceled', canceledBookings.length.toString(), `₱${canceledTotal.toLocaleString()}`],
+          ['Pending', pendingBookings.length.toString(), `₱${pendingTotal.toLocaleString()}`],
+          ['Total', filteredBookingsForStatus.length.toString(), `₱${(completedTotal + canceledTotal + pendingTotal).toLocaleString()}`]
+        ],
+        columnStyles: {
+          0: { cellWidth: 50 },
+          1: { cellWidth: 30, halign: 'center' },
+          2: { cellWidth: 50, halign: 'right' }
+        }
+      });
 
       await generateReportDocument(reportName, reportContent, "Financial_Report");
     } catch (error) {
@@ -1278,6 +1467,31 @@ function AdminPage({ onLogout }) {
 
       // Get bookings for activity analysis
       const filteredBookings = filterBookingsByDateRange(bookingTransactions, startDate, endDate);
+      
+      // Get all bookings for status breakdown
+      const bookingsRef = collection(db, "bookings");
+      const allBookingsSnapshot = await getDocs(bookingsRef);
+      const allBookings = allBookingsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      
+      // Filter bookings by date range
+      const filteredBookingsForStatus = allBookings.filter(booking => {
+        if (!startDate && !endDate) return true;
+        const bookingDate = booking.createdAt?.toDate ? booking.createdAt.toDate() : new Date(booking.createdAt || booking.bookingDate);
+        if (startDate) {
+          const start = new Date(startDate);
+          start.setHours(0, 0, 0, 0);
+          if (bookingDate < start) return false;
+        }
+        if (endDate) {
+          const end = new Date(endDate);
+          end.setHours(23, 59, 59, 999);
+          if (bookingDate > end) return false;
+        }
+        return true;
+      });
       
       const reportContent = [];
 
@@ -1407,6 +1621,48 @@ function AdminPage({ onLogout }) {
           fontSize: 10
         });
       }
+      reportContent.push({ type: 'spacing', value: 10 });
+
+      // Booking Status Breakdown
+      reportContent.push({
+        type: 'section',
+        text: 'BOOKING STATUS BREAKDOWN'
+      });
+      
+      // Categorize bookings by status
+      const completedBookings = filteredBookingsForStatus.filter(b => 
+        b.status === "Completed" || b.status === "completed" || 
+        (b.status !== "PendingApproval" && b.status !== "pending" && 
+         b.status !== "CancelledByGuest" && b.status !== "Cancelled" && 
+         b.status !== "CancelledByHost")
+      );
+      const canceledBookings = filteredBookingsForStatus.filter(b => 
+        b.status === "CancelledByGuest" || b.status === "Cancelled" || b.status === "CancelledByHost"
+      );
+      const pendingBookings = filteredBookingsForStatus.filter(b => 
+        b.status === "PendingApproval" || b.status === "pending"
+      );
+      
+      // Calculate totals for each status
+      const completedTotal = completedBookings.reduce((sum, b) => sum + (Number(b.total) || 0), 0);
+      const canceledTotal = canceledBookings.reduce((sum, b) => sum + (Number(b.total) || 0), 0);
+      const pendingTotal = pendingBookings.reduce((sum, b) => sum + (Number(b.total) || 0), 0);
+      
+      reportContent.push({
+        type: 'table',
+        headers: ['Status', 'Count', 'Total Amount'],
+        rows: [
+          ['Completed', completedBookings.length.toString(), `₱${completedTotal.toLocaleString()}`],
+          ['Canceled', canceledBookings.length.toString(), `₱${canceledTotal.toLocaleString()}`],
+          ['Pending', pendingBookings.length.toString(), `₱${pendingTotal.toLocaleString()}`],
+          ['Total', filteredBookingsForStatus.length.toString(), `₱${(completedTotal + canceledTotal + pendingTotal).toLocaleString()}`]
+        ],
+        columnStyles: {
+          0: { cellWidth: 50 },
+          1: { cellWidth: 30, halign: 'center' },
+          2: { cellWidth: 50, halign: 'right' }
+        }
+      });
 
       await generateReportDocument(reportName, reportContent, "User_Report");
     } catch (error) {
@@ -1435,6 +1691,31 @@ function AdminPage({ onLogout }) {
 
       // Get bookings for performance analysis
       const filteredBookings = filterBookingsByDateRange(bookingTransactions, startDate, endDate);
+      
+      // Get all bookings for status breakdown
+      const bookingsRef = collection(db, "bookings");
+      const allBookingsSnapshot = await getDocs(bookingsRef);
+      const allBookings = allBookingsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      
+      // Filter bookings by date range
+      const filteredBookingsForStatus = allBookings.filter(booking => {
+        if (!startDate && !endDate) return true;
+        const bookingDate = booking.createdAt?.toDate ? booking.createdAt.toDate() : new Date(booking.createdAt || booking.bookingDate);
+        if (startDate) {
+          const start = new Date(startDate);
+          start.setHours(0, 0, 0, 0);
+          if (bookingDate < start) return false;
+        }
+        if (endDate) {
+          const end = new Date(endDate);
+          end.setHours(23, 59, 59, 999);
+          if (bookingDate > end) return false;
+        }
+        return true;
+      });
       
       // Calculate performance metrics for each listing
       const listingPerformance = allListings.map(listing => {
@@ -1564,11 +1845,254 @@ function AdminPage({ onLogout }) {
           1: { cellWidth: 50, halign: 'right' }
         }
       });
+      reportContent.push({ type: 'spacing', value: 10 });
+
+      // Booking Status Breakdown
+      reportContent.push({
+        type: 'section',
+        text: 'BOOKING STATUS BREAKDOWN'
+      });
+      
+      // Categorize bookings by status
+      const completedBookings = filteredBookingsForStatus.filter(b => 
+        b.status === "Completed" || b.status === "completed" || 
+        (b.status !== "PendingApproval" && b.status !== "pending" && 
+         b.status !== "CancelledByGuest" && b.status !== "Cancelled" && 
+         b.status !== "CancelledByHost")
+      );
+      const canceledBookings = filteredBookingsForStatus.filter(b => 
+        b.status === "CancelledByGuest" || b.status === "Cancelled" || b.status === "CancelledByHost"
+      );
+      const pendingBookings = filteredBookingsForStatus.filter(b => 
+        b.status === "PendingApproval" || b.status === "pending"
+      );
+      
+      // Calculate totals for each status
+      const completedTotal = completedBookings.reduce((sum, b) => sum + (Number(b.total) || 0), 0);
+      const canceledTotal = canceledBookings.reduce((sum, b) => sum + (Number(b.total) || 0), 0);
+      const pendingTotal = pendingBookings.reduce((sum, b) => sum + (Number(b.total) || 0), 0);
+      
+      reportContent.push({
+        type: 'table',
+        headers: ['Status', 'Count', 'Total Amount'],
+        rows: [
+          ['Completed', completedBookings.length.toString(), `₱${completedTotal.toLocaleString()}`],
+          ['Canceled', canceledBookings.length.toString(), `₱${canceledTotal.toLocaleString()}`],
+          ['Pending', pendingBookings.length.toString(), `₱${pendingTotal.toLocaleString()}`],
+          ['Total', filteredBookingsForStatus.length.toString(), `₱${(completedTotal + canceledTotal + pendingTotal).toLocaleString()}`]
+        ],
+        columnStyles: {
+          0: { cellWidth: 50 },
+          1: { cellWidth: 30, halign: 'center' },
+          2: { cellWidth: 50, halign: 'right' }
+        }
+      });
 
       await generateReportDocument(reportName, reportContent, "Listing_Performance_Report");
     } catch (error) {
       console.error('Error generating listing performance report:', error);
       toast.error(`Failed to generate listing performance report: ${error.message}`, {
+        position: "top-right",
+      });
+    }
+  };
+
+  // Generate Booking Status Report (Completed, Cancelled, or Pending)
+  const handleGenerateBookingStatusReport = async (statusType) => {
+    try {
+      const statusLabels = {
+        'completed': 'Completed',
+        'cancelled': 'Cancelled',
+        'pending': 'Pending'
+      };
+      const statusLabel = statusLabels[statusType] || statusType;
+      const reportName = `${statusLabel} Bookings Report`;
+      const { startDate, endDate } = reportDateRange;
+      
+      // Get all bookings from Firestore
+      const bookingsRef = collection(db, "bookings");
+      const allBookingsSnapshot = await getDocs(bookingsRef);
+      const allBookings = allBookingsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      
+      // Filter bookings by date range
+      let filteredBookings = allBookings.filter(booking => {
+        if (!startDate && !endDate) return true;
+        const bookingDate = booking.createdAt?.toDate ? booking.createdAt.toDate() : new Date(booking.createdAt || booking.bookingDate);
+        if (startDate) {
+          const start = new Date(startDate);
+          start.setHours(0, 0, 0, 0);
+          if (bookingDate < start) return false;
+        }
+        if (endDate) {
+          const end = new Date(endDate);
+          end.setHours(23, 59, 59, 999);
+          if (bookingDate > end) return false;
+        }
+        return true;
+      });
+      
+      // Filter by status
+      let statusFilteredBookings = [];
+      if (statusType === 'completed') {
+        statusFilteredBookings = filteredBookings.filter(b => 
+          b.status === "Completed" || b.status === "completed" || 
+          (b.status !== "PendingApproval" && b.status !== "pending" && 
+           b.status !== "CancelledByGuest" && b.status !== "Cancelled" && 
+           b.status !== "CancelledByHost")
+        );
+      } else if (statusType === 'cancelled') {
+        statusFilteredBookings = filteredBookings.filter(b => 
+          b.status === "CancelledByGuest" || b.status === "Cancelled" || b.status === "CancelledByHost"
+        );
+      } else if (statusType === 'pending') {
+        statusFilteredBookings = filteredBookings.filter(b => 
+          b.status === "PendingApproval" || b.status === "pending"
+        );
+      }
+      
+      // Get user data for bookings
+      const bookingsWithUserData = await Promise.all(
+        statusFilteredBookings.map(async (booking) => {
+          let guestName = "Unknown Guest";
+          let hostName = "Unknown Host";
+          let guestEmail = "N/A";
+          let hostEmail = "N/A";
+
+          if (booking.guestId) {
+            try {
+              const guestDoc = await getDoc(doc(db, "users", booking.guestId));
+              if (guestDoc.exists()) {
+                const guestData = guestDoc.data();
+                guestName = guestData.name || guestData.email || "Unknown Guest";
+                guestEmail = guestData.email || "N/A";
+              }
+            } catch (error) {
+              console.error("Error fetching guest data:", error);
+            }
+          }
+
+          if (booking.hostId) {
+            try {
+              const hostDoc = await getDoc(doc(db, "users", booking.hostId));
+              if (hostDoc.exists()) {
+                const hostData = hostDoc.data();
+                hostName = hostData.name || hostData.email || "Unknown Host";
+                hostEmail = hostData.email || "N/A";
+              }
+            } catch (error) {
+              console.error("Error fetching host data:", error);
+            }
+          }
+
+          return {
+            ...booking,
+            guestName,
+            hostName,
+            guestEmail,
+            hostEmail
+          };
+        })
+      );
+      
+      const reportContent = [];
+      
+      // Add date range info if selected
+      if (startDate || endDate) {
+        reportContent.push({
+          type: 'text',
+          text: `Date Range: ${startDate || "All"} to ${endDate || "All"}`,
+          fontSize: 10,
+          italic: true
+        });
+        reportContent.push({ type: 'spacing', value: 5 });
+      }
+      
+      // Summary Section
+      reportContent.push({
+        type: 'section',
+        text: `${statusLabel.toUpperCase()} BOOKINGS SUMMARY`
+      });
+      
+      const totalAmount = statusFilteredBookings.reduce((sum, b) => sum + (Number(b.total) || 0), 0);
+      const totalCount = statusFilteredBookings.length;
+      
+      reportContent.push({
+        type: 'table',
+        headers: ['Metric', 'Value'],
+        rows: [
+          [`Total ${statusLabel} Bookings`, totalCount.toString()],
+          [`Total Amount`, `PHP ${totalAmount.toLocaleString()}`]
+        ],
+        columnStyles: {
+          0: { cellWidth: 80 },
+          1: { cellWidth: 50, halign: 'right' }
+        }
+      });
+      reportContent.push({ type: 'spacing', value: 10 });
+      
+      // Bookings Details Table
+      reportContent.push({
+        type: 'section',
+        text: `${statusLabel.toUpperCase()} BOOKINGS DETAILS`
+      });
+      
+      if (bookingsWithUserData.length > 0) {
+        const bookingRows = bookingsWithUserData.map((booking, index) => {
+          const bookingDate = booking.createdAt?.toDate ? booking.createdAt.toDate() : new Date(booking.createdAt || booking.bookingDate);
+          const formattedDate = bookingDate.toLocaleDateString('en-US', { 
+            year: 'numeric', 
+            month: 'short', 
+            day: 'numeric' 
+          });
+          
+          return [
+            (index + 1).toString(),
+            String(booking.title || "Untitled Booking"),
+            String(booking.guestName),
+            String(booking.hostName),
+            formattedDate,
+            String(booking.checkIn || "N/A"),
+            String(booking.checkOut || "N/A"),
+            `PHP ${(Number(booking.total) || 0).toLocaleString()}`,
+            String(booking.status || statusLabel)
+          ];
+        });
+        
+        reportContent.push({
+          type: 'table',
+          headers: ['#', 'Listing Title', 'Guest', 'Host', 'Booking Date', 'Check-In', 'Check-Out', 'Amount', 'Status'],
+          rows: bookingRows,
+          columnStyles: {
+            0: { cellWidth: 8, halign: 'center' },
+            1: { cellWidth: 'auto', halign: 'left' },
+            2: { cellWidth: 'auto', halign: 'left' },
+            3: { cellWidth: 'auto', halign: 'left' },
+            4: { cellWidth: 'auto', halign: 'center' },
+            5: { cellWidth: 'auto', halign: 'center' },
+            6: { cellWidth: 'auto', halign: 'center' },
+            7: { cellWidth: 'auto', halign: 'right' },
+            8: { cellWidth: 'auto', halign: 'center' }
+          }
+        });
+      } else {
+        reportContent.push({
+          type: 'text',
+          text: `No ${statusLabel.toLowerCase()} bookings found for the selected date range.`,
+          fontSize: 10
+        });
+      }
+
+      await generateReportDocument(reportName, reportContent, `${statusLabel}_Bookings_Report`);
+      
+      toast.success(`${statusLabel} bookings report generated successfully!`, {
+        position: "top-right",
+      });
+    } catch (error) {
+      console.error(`Error generating ${statusType} bookings report:`, error);
+      toast.error(`Failed to generate ${statusType} bookings report: ${error.message}`, {
         position: "top-right",
       });
     }
@@ -4540,10 +5064,10 @@ OR use Simulation Mode for testing (no funds needed).`;
               {/* Date Range Selection for Reports */}
               <div className="mb-4">
                 <label className="block text-sm font-semibold text-gray-700 mb-2">
-                  <FaCalendarAlt className="inline mr-1" /> Select Date Range for Report (Optional)
+                  <FaCalendarAlt className="inline mr-1" /> Select Year and Month for Report (Optional)
                 </label>
                 
-                <DateRangeCalendar
+                <ReportDateRangePicker
                   startDate={reportDateRange.startDate}
                   endDate={reportDateRange.endDate}
                   onChange={(dates) => setReportDateRange(dates)}
@@ -4566,7 +5090,7 @@ OR use Simulation Mode for testing (no funds needed).`;
                 )}
                 {!reportDateRange.startDate && !reportDateRange.endDate && (
                   <p className="text-xs text-gray-500 mt-2 italic">
-                    💡 Tip: Leave empty to include all data in your reports. Click dates on the calendar to select a date range.
+                    💡 Tip: Leave empty to include all data in your reports. Select a year, then choose a month for your monthly report.
                   </p>
                 )}
               </div>
@@ -4592,6 +5116,35 @@ OR use Simulation Mode for testing (no funds needed).`;
                 >
                   <FaChartBar /> Listing Performance Report
                 </button>
+              </div>
+
+              {/* Booking Status Reports */}
+              <div className="mt-6 pt-6 border-t border-gray-200">
+                <h3 className="text-sm font-bold text-gray-700 mb-3 uppercase tracking-wide">
+                  Booking Status Reports
+                </h3>
+                <div className="space-y-2">
+                <button
+                    onClick={() => handleGenerateBookingStatusReport('completed')}
+                    className="w-full bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition-all shadow-md hover:shadow-lg text-sm font-semibold flex items-center justify-center gap-2"
+                >
+                    <FaCheckCircle /> Completed Bookings Report
+                </button>
+                
+                <button
+                    onClick={() => handleGenerateBookingStatusReport('cancelled')}
+                    className="w-full bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition-all shadow-md hover:shadow-lg text-sm font-semibold flex items-center justify-center gap-2"
+                >
+                    <FaTimesCircle /> Cancelled Bookings Report
+                </button>
+                
+                <button
+                    onClick={() => handleGenerateBookingStatusReport('pending')}
+                    className="w-full bg-yellow-500 text-white px-4 py-2 rounded-lg hover:bg-yellow-600 transition-all shadow-md hover:shadow-lg text-sm font-semibold flex items-center justify-center gap-2"
+                  >
+                    <FaClock /> Pending Bookings Report
+                </button>
+                </div>
               </div>
               
               <p className="text-gray-500 text-xs mt-3">
